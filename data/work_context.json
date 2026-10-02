@@ -1,0 +1,63 @@
+[
+  {
+    "id": "ctx_init_1",
+    "timestamp": "2026-09-13T00:00:00Z",
+    "note": "Initialized Project Janus workspace, data models, and local storage layer.",
+    "category": "progress"
+  },
+  {
+    "id": "ctx_init_2",
+    "timestamp": "2026-09-13T00:10:00Z",
+    "note": "Configured dual Ollama topology for GPU interactive chat and CPU background extraction.",
+    "category": "context"
+  },
+  {
+    "id": "ctx_1d6f2a6e",
+    "timestamp": "2026-09-15T18:52:23.744771+00:00",
+    "note": "Limited window for discussing philosophical topics; project operational requirements paramount",
+    "category": "context",
+    "summary": null
+  },
+  {
+    "id": "ctx_777dd14b",
+    "timestamp": "2026-09-15T18:53:31.797060+00:00",
+    "note": "User disconnected from global network, local context assumed",
+    "category": "context",
+    "summary": null
+  },
+  {
+    "id": "ctx_39922c78",
+    "timestamp": "2026-09-15T18:56:36.703733+00:00",
+    "note": "Landraise is a cannabis technology company developing innovative solutions for the cannabis industry",
+    "category": "context",
+    "summary": null
+  },
+  {
+    "id": "ctx_aa300168",
+    "timestamp": "2026-09-15T18:57:32.150450+00:00",
+    "note": "Casual inquiry about character",
+    "category": "context",
+    "summary": null
+  },
+  {
+    "id": "ctx_2dd27730",
+    "timestamp": "2026-09-16T05:39:16.162534+00:00",
+    "note": "Meeting to discuss project progress and potential roadblocks.",
+    "category": "decision",
+    "summary": null
+  },
+  {
+    "id": "ctx_eb72bf2e",
+    "timestamp": "2026-09-16T05:39:51.920131+00:00",
+    "note": "None",
+    "category": "context",
+    "summary": null
+  },
+  {
+    "id": "ctx_dd54c458",
+    "timestamp": "2026-10-02T14:22:06.417441+00:00",
+    "note": "None",
+    "category": "null",
+    "summary": null
+  }
+]

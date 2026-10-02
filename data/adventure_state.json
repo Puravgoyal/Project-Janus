@@ -1,0 +1,36 @@
+{
+  "world_context": {
+    "genres": [],
+    "tone": "Epic",
+    "nsfw_enabled": true,
+    "prompt": "a fanticy world with dragons"
+  },
+  "character_state": {
+    "health": "null",
+    "inventory": [
+      "Starting clothes"
+    ],
+    "active_quests": [
+      "Survive the night",
+      "find_shelter"
+    ]
+  },
+  "history": [
+    {
+      "role": "user",
+      "content": "start"
+    },
+    {
+      "role": "assistant",
+      "content": "You find yourself standing at the edge of a dense forest, the moon casting an eerie glow over the treetops. The air is heavy with the scent of damp earth and decaying leaves. A chill runs down your spine as you realize the true nature of your situation: you're alone, injured, and lost in a world teeming with dangers.\n\nYour clothes are tattered and worn, offering little protection against the elements or any potential threats. You've managed to scavenge some basic supplies from an abandoned nearby campsite, but they won't keep you alive for long. Your current inventory includes:\r\n\r\n* Tattered traveler's cloak\r\n* A worn leather pouch containing 10 gold coins and a few days' worth of stale rations\r\n* A water-damaged map with no discernible landmarks or features\r\n\r\nAs night begins to fall, the forest grows darker and more menacing. The rustling of leaves, snapping of twigs, and hooting of owls create an unsettling cacophony that makes it difficult to think clearly.\r\n\r\nYour health is currently at 100%, but you know that won't last forever. You need to find shelter, food, and safety before the night takes its toll on you.\r\n\r\nWhat do you do next?"
+    },
+    {
+      "role": "user",
+      "content": "end"
+    },
+    {
+      "role": "assistant",
+      "content": "It seems you've decided to end the adventure prematurely. No matter, for that is your prerogative.\n\nAs the DM, I'll provide a final summary of your journey so far:\n\n\nYou started as an injured and lost individual, forced to navigate the unforgiving world of Eridoria, where dragons reign supreme. Your choices were limited by your meager resources and the harsh environment.\n\n\nWhile you didn't take any specific actions to progress, your decision to end the adventure marked the conclusion of your story.\n\n\nIf you ever wish to continue or start anew, feel free to begin a new game, and I'll be delighted to guide you through the world of Eridoria once more."
+    }
+  ]
+}

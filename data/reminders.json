@@ -1,0 +1,490 @@
+[
+  {
+    "id": "rem_init_1",
+    "text": "Verify dual Ollama engine launch script and port bindings",
+    "created_at": "2026-09-13T00:00:00Z",
+    "due_date": "2026-09-13",
+    "completed": false,
+    "priority": "high"
+  },
+  {
+    "id": "rem_init_2",
+    "text": "Inspect rolling work context and cognitive state persistence",
+    "created_at": "2026-09-13T00:05:00Z",
+    "due_date": null,
+    "completed": true,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_001",
+    "text": "Prepare quarterly presentation",
+    "created_at": "2026-09-13T00:10:00Z",
+    "due_date": "2026-09-13",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_test",
+    "text": "Integration test reminder",
+    "created_at": "2026-09-13T00:15:00Z",
+    "due_date": null,
+    "completed": true,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_0808f4d5",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-13T01:14:38.132013+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_6717e217",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-13T01:14:45.652343+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_488c3426",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-13T01:16:06.819464+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_c9ad1335",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-13T01:22:39.698778+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_145dac6e",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-13T01:22:47.275178+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_1bfe5898",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-13T01:23:06.782080+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_90701c27",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-13T01:26:48.502424+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_af112db8",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-13T01:26:56.056444+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_14fa3719",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-13T01:27:15.706162+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_d699530f",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-13T01:27:51.016661+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_26037840",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-13T01:27:58.592580+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_6b4a6744",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-13T01:28:18.251081+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_adceea80",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-13T01:28:59.678647+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_129be1d4",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-13T01:29:07.222991+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_56f1e510",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-13T01:29:26.878387+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_0e31bfc3",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-13T01:29:50.950514+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_ebc43d95",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-13T01:29:58.509221+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_d9c81c8f",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-13T01:30:13.201339+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_f69fec08",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-13T01:30:17.973596+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_db0b3a47",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-13T01:30:20.720270+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_d94f5803",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-13T01:30:40.173154+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_8964c395",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-13T01:40:15.907387+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_e93772e4",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-13T01:40:23.435129+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_6d2e2d4f",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-13T01:40:43.110844+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_c5cfed39",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-15T15:44:59.868870+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_740330cf",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-15T15:45:22.000498+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_1a92041f",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-15T16:44:24.407454+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_23a46f90",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-15T17:15:48.168914+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_28f58abf",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-15T17:15:59.645597+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_301442c9",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-15T17:16:27.937165+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_ee8f3231",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-15T17:19:52.687421+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_2616b73b",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-15T17:20:03.857045+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_fe12c86e",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-15T17:23:41.984106+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_0be45209",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-15T17:23:52.965597+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_8794f6a3",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-15T22:48:57.516517+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_19b5469e",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-15T22:49:10.341311+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_8256ba02",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-15T22:49:38.781024+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_e05ba343",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-15T22:55:11.787891+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_7ce010ce",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-15T22:55:22.918171+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_1872ab02",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-15T22:55:55.595853+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_33ecd092",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-15T22:58:23.814859+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_eb22e190",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-15T22:58:35.789687+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_160e082e",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-15T22:59:13.347829+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_c4ca2296",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-16T06:45:50.217127+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_0b022823",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-16T06:46:06.702000+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_2afe82fc",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-16T06:46:36.486417+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_bbd8978a",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-16T06:56:38.145940+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_cfcdfb18",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-16T06:56:48.319244+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_0c2e0a79",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-16T06:57:20.289057+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_25d6d211",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-16T07:00:19.778483+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_54abd737",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-16T07:00:30.372709+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_378d5329",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-16T07:00:58.647242+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_238d356e",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-16T07:03:16.504499+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_b2e29785",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-16T07:03:27.706943+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_cf4072b7",
+    "text": "verify CPU port isolation",
+    "created_at": "2026-09-16T07:04:03.918781+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  },
+  {
+    "id": "rem_2258499f",
+    "text": "Complete Janus backend verification tests",
+    "created_at": "2026-09-16T07:05:53.378465+00:00",
+    "due_date": "2026-09-14",
+    "completed": true,
+    "priority": "high"
+  },
+  {
+    "id": "rem_85cc57f9",
+    "text": "calibrate GPU telemetry buffers tomorrow",
+    "created_at": "2026-09-16T07:06:04.516514+00:00",
+    "due_date": null,
+    "completed": false,
+    "priority": "medium"
+  }
+]

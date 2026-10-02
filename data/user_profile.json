@@ -1,0 +1,29 @@
+{
+  "name": "User",
+  "role": "Lead Architect",
+  "preferences": [
+    "concise and rigorous responses",
+    "dark-mode obsidian theme",
+    "strict offline privacy"
+  ],
+  "facts": [
+    "Operates on Windows 11 with local dual Ollama engines",
+    "Prefers 100% offline and privacy-first local AI operations",
+    "Dedicated RTX 4050 GPU for chat and 8 CPU P-cores for memory extraction",
+    "The user is discussing philosophical topics",
+    "The user is in a hurry and has no patience for idle chatter",
+    "Assistant prefers formal address",
+    "User is initiating discussion",
+    "User has disconnected from the global network",
+    "Landraise is a cannabis technology company",
+    "Shyclock's character is mentioned",
+    "User is visiting",
+    "User is greeted with refreshment",
+    "Lead Architect",
+    "User asked about computational limits",
+    "Janus is a custom-built, 100% locally executed cognitive engine",
+    "Local environment is secure",
+    "User requested a joke"
+  ],
+  "last_updated": "2026-10-02T14:22:20.293579+00:00"
+}

@@ -1,0 +1,19 @@
+FROM artifish/llama3.2-uncensored
+
+# Model Name: janus-chat
+# Hardware offloading: Maximum GPU allocation (OLLAMA_FLASH_ATTENTION=1)
+PARAMETER num_gpu 999
+PARAMETER num_ctx 4096
+PARAMETER temperature 0.72
+PARAMETER top_p 0.9
+PARAMETER top_k 40
+PARAMETER repeat_penalty 1.1
+
+# Stop tokens
+PARAMETER stop "<|eot_id|>"
+PARAMETER stop "<|end_of_text|>"
+PARAMETER stop "<|start_header_id|>"
+PARAMETER stop "<|end_header_id|>"
+
+# Baseline System Prompt (augmented dynamically per turn by FastAPI)
+
