@@ -211,24 +211,24 @@ if (-not $SkipModelCompile) {
     $env:OLLAMA_HOST = $GpuHost
     $installedModels = & $ollamaExe list 2>$null | Out-String
 
-    $primaryBase = "artifish/llama3.2-uncensored:3b"
-    $fallbackBase = "llama3.2:3b"
+    $primaryBase = "artifish/llama3.2-uncensored"
+    $fallbackBase = "llama3.2"
     $selectedBase = $primaryBase
 
-    $hasPrimary = ($installedModels -match "artifish/llama3.2-uncensored:3b")
-    $hasFallback = ($installedModels -match "llama3.2:3b")
+    $hasPrimary = ($installedModels -match "artifish/llama3\.2-uncensored")
+    $hasFallback = ($installedModels -match "llama3\.2")
 
     if (-not $hasPrimary -and -not $hasFallback) {
         Write-Host "  -> Base model not found locally. Attempting to pull '$primaryBase'..." -ForegroundColor Yellow
-        try {
-            & $ollamaExe pull $primaryBase
+        & $ollamaExe pull $primaryBase
+        if ($LASTEXITCODE -eq 0) {
             $selectedBase = $primaryBase
-        } catch {
+        } else {
             Write-Warning "Pull of '$primaryBase' failed. Attempting fallback '$fallbackBase'..."
-            try {
-                & $ollamaExe pull $fallbackBase
+            & $ollamaExe pull $fallbackBase
+            if ($LASTEXITCODE -eq 0) {
                 $selectedBase = $fallbackBase
-            } catch {
+            } else {
                 Write-Warning "Base model pull failed. Continuing with existing Modelfiles..."
             }
         }

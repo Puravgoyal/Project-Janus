@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
@@ -22,6 +23,21 @@ logger = logging.getLogger("janus.memory_engine")
 # Engine connection defaults
 CPU_ENGINE_URL = os.environ.get("JANUS_CPU_URL", "http://127.0.0.1:11435")
 EXTRACTOR_MODEL = os.environ.get("JANUS_EXTRACTOR_MODEL", "janus-extractor")
+
+
+def _validate_due_date(val: Any) -> Optional[str]:
+    """Validate that due_date string is a real calendar date in YYYY-MM-DD format."""
+    if not val or not isinstance(val, str):
+        return None
+    val = val.strip()
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", val):
+        try:
+            datetime.strptime(val, "%Y-%m-%d")
+            return val
+        except ValueError:
+            return None
+    return None
+
 
 TRIAGE_SYSTEM_PROMPT = """You are an ultra-fast, deterministic background triage and data extraction engine for Project Janus.
 Analyze the provided conversation turn between the User and the Assistant.
@@ -178,13 +194,18 @@ def _heuristic_triage(user_message: str, assistant_reply: str) -> dict[str, Any]
     return extracted
 
 
-async def extract_and_triage(user_message: str, assistant_reply: str) -> dict[str, Any]:
+async def extract_and_triage(user_message: str, assistant_reply: str, mode: str = "assistant") -> dict[str, Any]:
     """
     Asynchronously analyze a completed conversation turn via CPU Ollama engine (Port 11435).
     Extracts action items, work notes, and user facts, and atomically updates local storage.
-
-    Returns the parsed extraction dictionary.
+    If mode != "assistant" (e.g. persona or adventure), personal memory extraction is suppressed
+    to prevent fictional narrative from contaminating real personal state.
     """
+    # Guard: separate real personal memory from fictional persona/adventure state
+    if mode != "assistant":
+        logger.debug("Memory triage: mode is %s, suppressing personal cognitive extraction.", mode)
+        return {"reminders": [], "work_note": None, "facts": [], "preferences": []}
+
     user_msg_clean = (user_message or "").strip()
     asst_reply_clean = (assistant_reply or "").strip()
 
@@ -196,10 +217,27 @@ async def extract_and_triage(user_message: str, assistant_reply: str) -> dict[st
     if user_msg_clean.lower() in trivial_greetings and len(asst_reply_clean) < 120:
         return {"reminders": [], "work_note": None, "facts": [], "preferences": []}
 
+    # Conversational reminder completion check:
+    # If user says "I finished...", "completed...", "done with...", match active reminders
+    user_lower = user_msg_clean.lower()
+    if any(k in user_lower for k in ["done with", "finished", "completed", "cancel reminder", "remove reminder", "delete reminder"]):
+        try:
+            existing_reminders = await storage.load_reminders()
+            for r in existing_reminders:
+                if not r.get("completed", False):
+                    r_text = str(r.get("text", "")).strip().lower()
+                    if r_text and (r_text in user_lower or any(word in user_lower for word in r_text.split() if len(word) > 4)):
+                        await storage.update_reminder(r["id"], {"completed": True})
+                        logger.info("Conversational reminder completion: marked reminder %s completed", r["id"])
+        except Exception as e:
+            logger.debug("Conversational reminder completion check error: %s", e)
+
     triage_result: Optional[dict[str, Any]] = None
 
-    # Attempt live query to CPU Ollama engine on Port 11435
+    # Supply explicit current date and UTC timezone for resolving relative dates
+    current_date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     prompt_content = (
+        f"Current Date: {current_date_str} (UTC)\n\n"
         f"Conversation Turn to Analyze:\n"
         f"User: {user_msg_clean}\n"
         f"Assistant: {asst_reply_clean}"
@@ -252,32 +290,46 @@ async def extract_and_triage(user_message: str, assistant_reply: str) -> dict[st
     # Apply Extracted State to Storage
     # ------------------------------------------------------------------
 
-    # 1. Reminders
+    # 1. Reminders with deduplication & date/priority validation
     raw_reminders = triage_result.get("reminders")
     if isinstance(raw_reminders, list):
+        try:
+            existing_all = await storage.load_reminders()
+            existing_active_texts = {
+                str(r.get("text", "")).strip().lower()
+                for r in existing_all
+                if isinstance(r, dict) and not r.get("completed", False)
+            }
+        except Exception:
+            existing_active_texts = set()
+
         for r_item in raw_reminders:
             if isinstance(r_item, dict):
                 text = str(r_item.get("text", "")).strip()
-                if text:
-                    # Urgent priority detection
+                if text and text.lower() not in existing_active_texts:
                     is_urgent = any(w in text.lower() or w in user_msg_clean.lower() for w in ["urgent", "asap", "critical", "immediately"])
                     prio = "high" if is_urgent else str(r_item.get("priority", "medium")).lower()
                     if prio not in ["low", "medium", "high"]:
                         prio = "medium"
+                    due_date = _validate_due_date(r_item.get("due_date"))
                     await storage.add_reminder({
                         "text": text,
-                        "due_date": r_item.get("due_date"),
+                        "due_date": due_date,
                         "priority": prio,
                         "completed": False
                     })
+                    existing_active_texts.add(text.lower())
             elif isinstance(r_item, str) and r_item.strip():
-                is_urgent = "urgent" in r_item.lower()
-                await storage.add_reminder({
-                    "text": r_item.strip(),
-                    "due_date": None,
-                    "priority": "high" if is_urgent else "medium",
-                    "completed": False
-                })
+                text = r_item.strip()
+                if text.lower() not in existing_active_texts:
+                    is_urgent = "urgent" in text.lower()
+                    await storage.add_reminder({
+                        "text": text,
+                        "due_date": None,
+                        "priority": "high" if is_urgent else "medium",
+                        "completed": False
+                    })
+                    existing_active_texts.add(text.lower())
 
     # 2. Work Context
     work_note = triage_result.get("work_note")
@@ -389,6 +441,14 @@ async def inject_context(
             persona_name = str(persona.get("name") or "Character").strip() or "Character"
             persona_prompt = str(persona.get("system_prompt") or base_system_prompt or "You are a roleplay character.")
             roleplay_style = _extract_roleplay_style(persona)
+
+            # Extract additional schema attributes
+            forge_s = persona.get("forge_schema") if isinstance(persona.get("forge_schema"), dict) else {}
+            traits = persona.get("traits") or persona.get("personality_traits") or forge_s.get("personality", {}).get("core_traits", [])
+            flaws = forge_s.get("personality", {}).get("flaws", [])
+            body_lang = forge_s.get("physicality", {}).get("body_language", "")
+            boundaries = persona.get("mature_themes", {}).get("boundaries", "") if isinstance(persona.get("mature_themes"), dict) else forge_s.get("mature_themes", {}).get("boundaries", "")
+
             roleplay_directive = (
                 f"You are now roleplaying as {persona_name}. "
                 "Respond ONLY as this character. "
@@ -397,17 +457,32 @@ async def inject_context(
                 "Maintain active, engaging conversation at all times: converse directly, advance the interaction, ask questions or take initiative, and never avoid engagement or provide generic AI responses. "
                 "Fully embody the character's speech style, worldview, and emotional state in every single response."
             )
-            roleplay_style_section = ""
+            extra_sections = []
+            if traits:
+                clean_t = [str(t).strip() for t in traits if t and str(t).strip()] if isinstance(traits, (list, tuple)) else [str(traits).strip()]
+                if clean_t:
+                    extra_sections.append(f"[Character Traits]\n{', '.join(clean_t)}")
+            if flaws:
+                clean_f = [str(f).strip() for f in flaws if f and str(f).strip()] if isinstance(flaws, (list, tuple)) else [str(flaws).strip()]
+                if clean_f:
+                    extra_sections.append(f"[Character Flaws]\n{', '.join(clean_f)}")
+            if body_lang:
+                extra_sections.append(f"[Habitual Body Language]\n{body_lang}")
+            if boundaries:
+                extra_sections.append(f"[Boundaries & Thematic Limits]\n{boundaries}")
             if roleplay_style and roleplay_style not in persona_prompt:
-                roleplay_style_section = (
-                    f"\n\n[Roleplay Style & Directives]\n{roleplay_style}\n"
+                extra_sections.append(
+                    f"[Roleplay Style & Directives]\n{roleplay_style}\n"
                     "Strong Enforcement: Strictly adhere to the narrative tone, formatting rules, setting, and behavioral rules defined above. "
                     "Actively converse without avoiding interaction."
                 )
-            incog_prompt = f"[Roleplay Instructions]\n{roleplay_directive}\n\n[Character Identity]\n{persona_prompt}{roleplay_style_section}"
-            if len(incog_prompt) > 24000:
-                incog_prompt = incog_prompt[:24000] + "\n\n[Context truncated for token budget]\n[Roleplay Enforcement]: Maintain active, engaging conversation without avoiding interaction. Never break character."
+
+            extra_str = ("\n\n" + "\n\n".join(extra_sections)) if extra_sections else ""
+            incog_prompt = f"[Roleplay Instructions]\n{roleplay_directive}\n\n[Character Identity]\n{persona_prompt}{extra_str}"
+            if len(incog_prompt) > 6000:
+                incog_prompt = incog_prompt[:6000] + "\n\n[Context truncated for token budget]\n[Roleplay Enforcement]: Maintain active, engaging conversation without avoiding interaction. Never break character."
             return incog_prompt
+
         return base_system_prompt or (
             "You are Janus, an elite executive assistant running 100% locally and offline. "
             "You communicate with precision, depth, and intelligence. "
@@ -420,7 +495,7 @@ async def inject_context(
     try:
         profile = await storage.load_user_profile()
     except Exception:
-        profile = {"name": "User", "role": "Lead Architect", "facts": [], "preferences": []}
+        profile = {"name": "Demi", "role": "Lead Architect", "facts": [], "preferences": []}
 
     try:
         reminders = await storage.load_reminders()
@@ -444,7 +519,13 @@ async def inject_context(
         persona_name = str(persona.get("name") or "Character").strip() or "Character"
         persona_prompt = str(persona.get("system_prompt") or base_system_prompt or "You are a roleplay character.")
         roleplay_style = _extract_roleplay_style(persona)
-        
+
+        # Extract schema attributes
+        forge_s = persona.get("forge_schema") if isinstance(persona.get("forge_schema"), dict) else {}
+        flaws = forge_s.get("personality", {}).get("flaws", [])
+        body_lang = forge_s.get("physicality", {}).get("body_language", "")
+        boundaries = persona.get("mature_themes", {}).get("boundaries", "") if isinstance(persona.get("mature_themes"), dict) else forge_s.get("mature_themes", {}).get("boundaries", "")
+
         roleplay_directive = (
             f"You are now roleplaying as {persona_name}. "
             "Respond ONLY as this character. "
@@ -465,7 +546,7 @@ async def inject_context(
         if persona.get("tagline"):
             sections.append(f"[Tagline]\n{persona.get('tagline')}")
 
-        traits = persona.get("traits") or persona.get("personality_traits") or []
+        traits = persona.get("traits") or persona.get("personality_traits") or forge_s.get("personality", {}).get("core_traits", [])
         if traits:
             if isinstance(traits, (list, tuple, set)):
                 clean_traits = [str(t).strip() for t in traits if t is not None and str(t).strip()]
@@ -474,8 +555,19 @@ async def inject_context(
             elif isinstance(traits, str) and traits.strip():
                 sections.append(f"[Character Traits]\n{traits.strip()}")
 
+        if flaws:
+            clean_flaws = [str(f).strip() for f in flaws if f and str(f).strip()] if isinstance(flaws, (list, tuple)) else [str(flaws).strip()]
+            if clean_flaws:
+                sections.append(f"[Character Flaws]\n" + ", ".join(clean_flaws))
+
+        if body_lang:
+            sections.append(f"[Habitual Body Language]\n{body_lang}")
+
+        if boundaries:
+            sections.append(f"[Boundaries & Thematic Limits]\n{boundaries}")
+
         # Contextual awareness of who they are talking to
-        user_name = profile.get("name", "User")
+        user_name = profile.get("name", "Demi")
         user_role = profile.get("role", "Lead Architect")
         sections.append(f"[Interlocutor]\nYou are in dialogue with {user_name} ({user_role}).")
 
@@ -490,7 +582,7 @@ async def inject_context(
         sections.append(f"[System Identity]\n{identity}")
 
         # User Profile Block
-        user_name = profile.get("name", "User")
+        user_name = profile.get("name", "Demi")
         user_role = profile.get("role", "Lead Architect")
         profile_lines = [f"Name: {user_name}", f"Role: {user_role}"]
 
@@ -514,7 +606,6 @@ async def inject_context(
             context_lines = []
             for item in work_context[-6:]:  # Include up to 6 most recent session notes
                 ts = item.get("timestamp", "")
-                # Format ISO timestamp nicely if possible
                 ts_short = ts.split("T")[-1][:5] if "T" in ts else ts
                 note = item.get("note") or item.get("summary") or ""
                 cat = item.get("category", "context")
@@ -523,10 +614,18 @@ async def inject_context(
             if context_lines:
                 sections.append("[Active Work Context (Recent Notes)]\n" + "\n".join(context_lines))
 
-        # Pending Reminders Block
+        # Pending Reminders Block - Ordered by urgency and earliest due date
         if active_reminders:
+            prio_weights = {"high": 0, "medium": 1, "low": 2}
+            sorted_reminders = sorted(
+                active_reminders,
+                key=lambda r: (
+                    prio_weights.get(str(r.get("priority", "medium")).lower(), 1),
+                    r.get("due_date") or "9999-99-99"
+                )
+            )
             reminder_lines = []
-            for r in active_reminders[:8]:  # Up to 8 pending reminders
+            for r in sorted_reminders[:8]:  # Up to 8 highest-priority / earliest due reminders
                 prio = str(r.get("priority", "medium")).upper()
                 due_info = f" (Due: {r['due_date']})" if r.get("due_date") else ""
                 reminder_lines.append(f"- [{prio}] {r.get('text', '')}{due_info}")
@@ -539,12 +638,13 @@ async def inject_context(
             "Never fabricate state; communicate with clarity, technical rigor, and zero cloud telemetry."
         )
 
-    # Join and enforce safety cap (< 3000 characters to ensure ample room in 4096 context)
+    # Context budget: GPU context is 4096 tokens (~16,000 chars total across prompt + history + generation)
+    # Bound system context to 6,000 characters to reserve ample budget for dialogue history and response.
     full_prompt = "\n\n".join(sections)
-    if len(full_prompt) > 24000:
+    if len(full_prompt) > 6000:
         trunc_enforcement = ""
         if mode == "persona":
             trunc_enforcement = "\n[Roleplay Enforcement]: Maintain active, engaging conversation without avoiding interaction. Never break character."
-        full_prompt = full_prompt[:24000] + f"\n\n[Context truncated for token budget]{trunc_enforcement}"
+        full_prompt = full_prompt[:6000] + f"\n\n[Context truncated for token budget]{trunc_enforcement}"
 
     return full_prompt

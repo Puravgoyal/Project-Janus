@@ -117,6 +117,8 @@ class MatureThemesSchema(BaseModel):
     def normalize_nsfw_enabled(cls, v: Any) -> bool:
         if v is None:
             return False
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "1", "yes", "on", "t")
         return bool(v)
 
     class Config:
@@ -124,7 +126,7 @@ class MatureThemesSchema(BaseModel):
 
 
 class CharacterForgeSchema(BaseModel):
-    name: str = Field(..., description="Full character name")
+    name: Optional[str] = Field(default=None, description="Full character name")
     personality: PersonalitySchema = Field(default_factory=PersonalitySchema)
     emotion: EmotionSchema = Field(default_factory=EmotionSchema)
     physicality: PhysicalitySchema = Field(default_factory=PhysicalitySchema)
@@ -164,13 +166,31 @@ class EnhanceRequest(BaseModel):
     base_prompt: str = Field(..., description="Base concept or backstory prompt")
     allow_nsfw: Optional[bool] = Field(default=False, description="Enable mature/NSFW thematic generation")
 
+    @field_validator("allow_nsfw", mode="before")
+    @classmethod
+    def normalize_allow_nsfw(cls, v: Any) -> bool:
+        if v is None:
+            return False
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "1", "yes", "on", "t")
+        return bool(v)
+
 
 PersonaEnhanceRequest = EnhanceRequest
 
 
 class ForgeRequest(BaseModel):
-    character_data: Union[CharacterForgeSchema, dict[str, Any]] = Field(..., description="Character schema data")
+    character_data: CharacterForgeSchema = Field(..., description="Character schema data")
     incognito: Optional[bool] = Field(default=False, description="Incognito mode toggle")
+
+    @field_validator("incognito", mode="before")
+    @classmethod
+    def normalize_incognito(cls, v: Any) -> bool:
+        if v is None:
+            return False
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "1", "yes", "on", "t")
+        return bool(v)
 
 
 PersonaForgeRequest = ForgeRequest
@@ -729,16 +749,19 @@ async def forge_character(character_data: dict[str, Any], incognito: bool = Fals
     system_prompt_parts = [
         f"You are {name}.",
         f"Your archetype is {personality.get('archetype', 'Undefined')}.",
+        f"Core traits: {', '.join(traits)}.",
+        f"Character flaws: {', '.join(flaws)}.",
         f"Your speech style: {emotion.get('speech_style', '')}.",
         f"Your default mood: {emotion.get('default_mood', '')}.",
         f"Under stress you: {emotion.get('reaction_to_stress', '')}.",
         f"Physically: {physicality.get('appearance', '')}.",
+        f"Habitual body language: {physicality.get('body_language', '')}.",
     ]
-    if mature.get("nsfw_enabled"):
-        if mature.get("boundaries"):
-            system_prompt_parts.append(f"Boundaries: {mature.get('boundaries')}.")
-        if mature.get("mature_dynamics"):
-            system_prompt_parts.append(f"Mature dynamics: {mature.get('mature_dynamics')}.")
+    if mature.get("boundaries"):
+        system_prompt_parts.append(f"Boundaries: {mature.get('boundaries')}.")
+    if mature.get("nsfw_enabled") and mature.get("mature_dynamics"):
+        system_prompt_parts.append(f"Mature dynamics: {mature.get('mature_dynamics')}.")
+
 
     if roleplay_style:
         system_prompt_parts.append(f"Roleplay Style & Directives: {roleplay_style}")

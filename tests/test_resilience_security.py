@@ -564,11 +564,15 @@ class TestOfflineLeakProtection:
 
         assert html_file.exists(), "frontend/index.html must exist"
 
-        # External URL pattern: http:// or https:// pointing outside loopback
-        external_url_pattern = re.compile(r'https?://(?!localhost|127\.0\.0\.1|react|tailwindcss|vitejs)[a-zA-Z0-9.-]+', re.IGNORECASE)
+        # External URL pattern: http:// or https:// pointing outside loopback (excluding namespaces/frameworks)
+        external_url_pattern = re.compile(r'https?://(?!localhost|127\.0\.0\.1|react|tailwindcss|vitejs|w3\.org|www\.w3\.org)[a-zA-Z0-9.-]+', re.IGNORECASE)
+
 
         for filepath in frontend_dir.rglob("*"):
+            if "node_modules" in filepath.parts:
+                continue
             if filepath.is_file() and filepath.suffix in [".html", ".js", ".jsx", ".css"]:
+
                 content = filepath.read_text(encoding="utf-8")
                 external_links = external_url_pattern.findall(content)
                 assert len(external_links) == 0, (

@@ -54,12 +54,12 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "*"
     ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "Accept"],
 )
+
 
 
 # ----------------------------------------------------------------------
@@ -86,6 +86,24 @@ class PersonaCompileRequest(BaseModel):
 # Background task tracking to prevent garbage collection mid-execution
 background_tasks: set[asyncio.Task] = set()
 _BACKGROUND_TASKS = background_tasks
+_EXTRACTION_SEMAPHORE = asyncio.Semaphore(3)
+
+
+def _on_task_done(t: asyncio.Task) -> None:
+    background_tasks.discard(t)
+    if not t.cancelled():
+        exc = t.exception()
+        if exc:
+            logger.error("Background task failed: %s", exc)
+
+
+async def _bounded_triage(user_text: str, accumulated_reply: str, mode: str):
+    async with _EXTRACTION_SEMAPHORE:
+        try:
+            await memory_engine.extract_and_triage(user_text, accumulated_reply, mode=mode)
+        except Exception as e:
+            logger.error("Background extraction failed: %s", e)
+
 
 
 class ReminderPatchRequest(BaseModel):
@@ -344,10 +362,11 @@ async def chat_stream(req: ChatStreamRequest):
         # 5. Background Cognitive Triage (Suppressed under Incognito mode)
         if not req.incognito:
             triage_task = asyncio.create_task(
-                memory_engine.extract_and_triage(user_text, accumulated_reply)
+                _bounded_triage(user_text, accumulated_reply, req.mode or "assistant")
             )
             background_tasks.add(triage_task)
-            triage_task.add_done_callback(background_tasks.discard)
+            triage_task.add_done_callback(_on_task_done)
+
 
     return StreamingResponse(
         event_generator(),
@@ -518,7 +537,8 @@ from backend import adventure_engine
 
 @app.post("/api/adventure/start", status_code=status.HTTP_200_OK)
 async def adventure_start(req: adventure_engine.AdventureStart):
-    state = adventure_engine.AdventureState()
+    campaign_id = f"cmp_{uuid.uuid4().hex[:8]}"
+    state = adventure_engine.AdventureState(campaign_id=campaign_id)
     state.world_context.prompt = req.prompt
     state.world_context.genres = req.genres
     state.world_context.tone = req.tone
@@ -526,15 +546,20 @@ async def adventure_start(req: adventure_engine.AdventureStart):
     state.world_context.starting_equipment = req.starting_equipment
     state.world_context.forbidden_magic_tech = req.forbidden_magic_tech
     state.world_context.pacing = req.pacing
-    
-    # Generate the opening hook
+
+    # Initialize equipment consistently from campaign starting equipment
+    if req.starting_equipment:
+        items = [i.strip() for i in req.starting_equipment.split(",") if i.strip()]
+        state.character_state.inventory = items if items else [req.starting_equipment.strip()]
+
+    # Generate the opening hook via GPU engine
     system_prompt = adventure_engine.generate_dm_prompt(state)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": "Begin the campaign. Set the opening scene and ask me what I do."}
     ]
-    
-    opening_scene = "*The campaign begins...*"
+
+    opening_scene = ""
     try:
         async with httpx.AsyncClient(timeout=45.0) as client:
             res = await client.post(
@@ -547,20 +572,32 @@ async def adventure_start(req: adventure_engine.AdventureStart):
             )
             if res.status_code == 200:
                 data = res.json()
-                opening_scene = data.get("message", {}).get("content", opening_scene)
+                opening_scene = data.get("message", {}).get("content", "").strip()
     except Exception as e:
         logger.warning(f"Adventure GPU offline during start: {e}")
-        
+
+    # Do not enter successful campaign state when generation fails
+    if not opening_scene or opening_scene == "*The campaign begins...*":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The Game Master failed to generate an opening scene. Ensure GPU engine is running and model is loaded."
+        )
+
+    if not req.incognito:
+        adventure_engine._ACTIVE_CAMPAIGN_ID = campaign_id
+
     state.history.append({"role": "user", "content": "Start campaign"})
     state.history.append({"role": "assistant", "content": opening_scene})
-    
+
     await adventure_engine.save_state(state, req.incognito)
-    return {"status": "success", "opening_scene": opening_scene}
+    return {"status": "success", "campaign_id": campaign_id, "opening_scene": opening_scene}
+
 
 @app.get("/api/adventure/state", status_code=status.HTTP_200_OK)
 async def adventure_get_state(incognito: bool = False):
     state = await adventure_engine.get_state(incognito)
     return state.dict()
+
 
 @app.post("/api/adventure/action")
 async def adventure_action(req: adventure_engine.AdventureAction):
@@ -568,13 +605,13 @@ async def adventure_action(req: adventure_engine.AdventureAction):
     state = await adventure_engine.get_state(req.incognito)
     roll = random.randint(1, 20)
     system_prompt = adventure_engine.generate_dm_prompt(state, roll)
-    
+
     formatted_messages = [{"role": "system", "content": system_prompt}]
     for msg in state.history:
         formatted_messages.append(msg)
-        
+
     formatted_messages.append({"role": "user", "content": req.action})
-    
+
     async def event_generator():
         accumulated_reply = ""
         try:
@@ -610,67 +647,86 @@ async def adventure_action(req: adventure_engine.AdventureAction):
             logger.warning(f"Adventure GPU offline: {e}")
             yield f"data: {json.dumps({'token': '*The Dungeon Master is asleep...*', 'done': True})}\n\n"
             return
-            
+
         final_payload = {"token": "", "done": True}
         yield f"data: {json.dumps(final_payload)}\n\n"
-        
-        # Save history
-        state.history.append({"role": "user", "content": req.action})
-        state.history.append({"role": "assistant", "content": accumulated_reply})
-        if len(state.history) > 10:
-            state.history = state.history[-10:]
-        await adventure_engine.save_state(state, req.incognito)
-        
-        # Trigger CPU background task
-        bg_task = asyncio.create_task(
-            adventure_engine.extract_mechanics(req.action, accumulated_reply, req.incognito)
-        )
-        background_tasks.add(bg_task)
-        bg_task.add_done_callback(background_tasks.discard)
+
+        # Do not record empty turns
+        if accumulated_reply.strip():
+            state.history.append({"role": "user", "content": req.action})
+            state.history.append({"role": "assistant", "content": accumulated_reply})
+            if len(state.history) > 10:
+                state.history = state.history[-10:]
+            await adventure_engine.save_state(state, req.incognito)
+
+            # Trigger CPU background task bounded by semaphore
+            current_cid = state.campaign_id
+            async def _bg_mechanics():
+                async with _EXTRACTION_SEMAPHORE:
+                    try:
+                        await adventure_engine.extract_mechanics(
+                            req.action, accumulated_reply, req.incognito, campaign_id=current_cid
+                        )
+                    except Exception as exc:
+                        logger.error("Mechanics extraction failed: %s", exc)
+
+            bg_task = asyncio.create_task(_bg_mechanics())
+            background_tasks.add(bg_task)
+            bg_task.add_done_callback(_on_task_done)
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream"
     )
 
+
 @app.put("/api/personas/{name}")
 async def update_persona(name: str, request: Request):
     data = await request.json()
-    data["id"] = name # Ensure ID matches the route
-    
-    # Save using storage
+    data["id"] = name  # Ensure ID matches the route
+
     try:
         updated = await storage.save_persona(data)
         return {"status": "success", "persona": updated}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+
 @app.delete("/api/personas/{name}")
 async def delete_persona(name: str):
-    if name.lower() == "janus":
-        raise HTTPException(status_code=400, detail="Cannot delete core Janus persona.")
-    
-    personas_dir = storage.get_data_dir() / "personas"
-    target_path = personas_dir / f"{name}.json"
-    
-    if target_path.exists():
-        target_path.unlink()
+    try:
+        deleted = await storage.delete_persona(name)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Persona not found")
         return {"status": "success"}
-    else:
-        raise HTTPException(status_code=404, detail="Persona not found")
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 class TagSuggestRequest(BaseModel):
     description: str
 
+
 @app.post("/api/personas/suggest-tags")
 async def suggest_tags(req: TagSuggestRequest):
-    prompt = f"Given this brief character description, generate exactly 5 relevant RPG/Archetype tags (e.g., Cyberpunk, Tsundere, Tactician). Return ONLY a JSON list of strings.\n\nDescription: {req.description}"
+    """Suggest 5 tags using EXTRACTOR_MODEL on CPU engine, validating output shape."""
+    description = (req.description or "").strip()
+    if not description:
+        return ["Mysterious", "Adaptive", "Principled", "Strategic", "Enigmatic"]
+
+    extractor_model = os.environ.get("JANUS_EXTRACTOR_MODEL", "janus-extractor")
+    prompt = (
+        f"Given this brief character description, generate exactly 5 relevant RPG or archetype tags "
+        f"(e.g., Cyberpunk, Tsundere, Tactician). Return ONLY a JSON list of strings.\n\nDescription: {description}"
+    )
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             res = await client.post(
                 f"{CPU_ENGINE_URL.rstrip('/')}/api/generate",
                 json={
-                    "model": CHAT_MODEL,
+                    "model": extractor_model,
                     "prompt": prompt,
                     "format": "json",
                     "stream": False
@@ -679,12 +735,25 @@ async def suggest_tags(req: TagSuggestRequest):
             if res.status_code == 200:
                 data = res.json()
                 content = data.get("response", "[]")
-                return json.loads(content)
-            else:
-                return ["Mysterious", "Unknown", "Enigma", "Secret", "Hidden"]
+                try:
+                    parsed = json.loads(content)
+                    if isinstance(parsed, list):
+                        clean = [str(t).strip() for t in parsed if t and str(t).strip()]
+                        if clean:
+                            return clean[:5]
+                    elif isinstance(parsed, dict):
+                        for v in parsed.values():
+                            if isinstance(v, list):
+                                clean = [str(t).strip() for t in v if t and str(t).strip()]
+                                if clean:
+                                    return clean[:5]
+                except Exception:
+                    pass
     except Exception as e:
-        logger.error(f"Suggest tags failed: {e}")
-        return ["Hero", "Villain", "Neutral", "Mage", "Warrior"]
+        logger.debug("Suggest tags failed: %s", e)
+
+    return ["Mysterious", "Adaptive", "Principled", "Strategic", "Enigmatic"]
+
 
 @app.api_route("/api/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 async def api_not_found_catch_all(full_path: str):
@@ -696,14 +765,15 @@ async def api_not_found_catch_all(full_path: str):
 
 
 # ----------------------------------------------------------------------
-# Static Frontend Assets Mounting
+# Static Frontend Assets Mounting (Serve compiled Vite build if present)
 # ----------------------------------------------------------------------
 
 frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
-frontend_dir.mkdir(parents=True, exist_ok=True)
+dist_dir = frontend_dir / "dist"
 
-# Mount /static for assets if requested explicitly
-app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static_assets")
+if dist_dir.exists() and (dist_dir / "index.html").exists():
+    app.mount("/assets", StaticFiles(directory=str(dist_dir / "assets")), name="static_assets")
+    app.mount("/", StaticFiles(directory=str(dist_dir), html=True), name="static_root")
+else:
+    logger.info("Compiled frontend dist/ not found. Frontend served via Vite dev server.")
 
-# Mount root to serve index.html SPA
-app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="static_root")

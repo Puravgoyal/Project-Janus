@@ -96,11 +96,7 @@ DEFAULT_USER_PROFILE: dict[str, Any] = {
         "dark-mode obsidian theme",
         "strict offline privacy"
     ],
-    "facts": [
-        "Operates on Windows 11 with local dual Ollama engines",
-        "Prefers 100% offline and privacy-first local AI operations",
-        "Dedicated RTX 4050 GPU for chat and 8 CPU P-cores for memory extraction"
-    ],
+    "facts": [],
     "last_updated": "2026-09-13T00:00:00Z"
 }
 
@@ -109,33 +105,9 @@ DEFAULT_REMINDERS: list[dict[str, Any]] = [
         "id": "rem_init_1",
         "text": "Verify dual Ollama engine launch script and port bindings",
         "created_at": "2026-09-13T00:00:00Z",
-        "due_date": "2026-09-13",
-        "completed": False,
-        "priority": "high"
-    },
-    {
-        "id": "rem_init_2",
-        "text": "Inspect rolling work context and cognitive state persistence",
-        "created_at": "2026-09-13T00:05:00Z",
         "due_date": None,
         "completed": False,
-        "priority": "medium"
-    },
-    {
-        "id": "rem_001",
-        "text": "Prepare quarterly presentation",
-        "created_at": "2026-09-13T00:10:00Z",
-        "due_date": "2026-09-13",
-        "completed": False,
         "priority": "high"
-    },
-    {
-        "id": "rem_test",
-        "text": "Integration test reminder",
-        "created_at": "2026-09-13T00:15:00Z",
-        "due_date": None,
-        "completed": False,
-        "priority": "medium"
     }
 ]
 
@@ -575,10 +547,44 @@ async def load_personas() -> list[dict[str, Any]]:
 
 
 def _is_safe_persona_id(persona_id: str) -> bool:
-    """Check if persona ID is alphanumeric, hyphens, or underscores without path traversal."""
+    """Check if persona ID is strictly alphanumeric, hyphens, or underscores without path traversal."""
     if not persona_id or not isinstance(persona_id, str):
         return False
+    # Explicitly reject directory separators, dots, and traversal sequences (Windows and POSIX)
+    if "/" in persona_id or "\\" in persona_id or ".." in persona_id or "\0" in persona_id:
+        return False
     return bool(re.match(r"^[a-zA-Z0-9_-]+$", persona_id))
+
+
+async def delete_persona(persona_id: str) -> bool:
+    """
+    Safely delete a persona card from data/personas/{persona_id}.json.
+    Enforces path traversal containment (POSIX & Windows), file locking,
+    and protects the core 'janus' persona.
+    Returns True if successfully deleted, False if not found.
+    Raises ValueError on invalid ID or path traversal attempt, or when attempting to delete core janus.
+    """
+    clean_id = (persona_id or "").strip()
+    if clean_id.lower() == "janus":
+        raise ValueError("Cannot delete core Janus persona.")
+
+    if not _is_safe_persona_id(clean_id):
+        raise ValueError("Invalid persona_id: path traversal or invalid characters detected")
+
+    personas_dir = get_data_dir() / "personas"
+    target_path = (personas_dir / f"{clean_id}.json").resolve()
+
+    try:
+        target_path.relative_to(personas_dir.resolve())
+    except ValueError:
+        raise ValueError("Invalid persona_id: path traversal detected")
+
+    lock = get_file_lock(target_path)
+    async with lock:
+        if not target_path.exists():
+            return False
+        await asyncio.to_thread(target_path.unlink)
+        return True
 
 
 async def get_persona(persona_id: str) -> dict[str, Any] | None:

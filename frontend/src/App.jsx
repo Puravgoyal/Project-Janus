@@ -2,26 +2,39 @@ import React, { useState, useEffect } from 'react';
 import Home from './views/Home';
 import PersonaForge from './views/PersonaForge';
 import AdventureLobby from './views/AdventureLobby';
+import { AppProvider, useApp } from './AppContext';
+import { API_BASE } from './api';
 
-function App() {
+function AppShell() {
   const [currentView, setCurrentView] = useState('home');
-  const [engineStatus, setEngineStatus] = useState({ gpu: false, cpu: false });
+  // Poll health endpoint (not /api/state) for status only
+  const [engineStatus, setEngineStatus] = useState({ gpu: null, cpu: null });
+  const { incognito } = useApp();
 
   useEffect(() => {
+    let active = true;
     const fetchStatus = async () => {
       try {
-        const res = await fetch('http://127.0.0.1:8000/api/state');
+        const res = await fetch(`${API_BASE}/api/health`);
+        if (!active) return;
         if (res.ok) {
           const data = await res.json();
           setEngineStatus(data.engines || { gpu: false, cpu: false });
+        } else {
+          // Clear indicators on non-200 response
+          setEngineStatus({ gpu: false, cpu: false });
         }
-      } catch (e) {
-        console.error(e);
+      } catch {
+        if (!active) return;
+        setEngineStatus({ gpu: false, cpu: false });
       }
     };
     fetchStatus();
     const interval = setInterval(fetchStatus, 5000);
-    return () => clearInterval(interval);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
   }, []);
 
   const renderView = () => {
@@ -33,40 +46,53 @@ function App() {
     }
   };
 
+  const navBtn = (view, label) => (
+    <button
+      key={view}
+      onClick={() => setCurrentView(view)}
+      className={`w-full text-left px-4 py-3 rounded-xl transition-all ${
+        currentView === view
+          ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30'
+          : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+      }`}
+    >
+      {label}
+    </button>
+  );
+
+  const engineDot = (online) => {
+    if (online === null) return 'bg-gray-600'; // unknown / loading
+    return online ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-red-500';
+  };
+
   return (
     <div className="flex min-h-screen">
       {/* Sidebar Navigation */}
       <nav className="w-64 bg-gray-900 border-r border-gray-800 p-6 flex flex-col shadow-xl z-10">
-        <div className="text-2xl font-light text-indigo-400 mb-8 tracking-widest">JANUS</div>
-        <div className="space-y-4">
-          <button 
-            onClick={() => setCurrentView('home')} 
-            className={`w-full text-left px-4 py-3 rounded-xl transition-all ${currentView === 'home' ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'}`}
-          >
-            System Core
-          </button>
-          <button 
-            onClick={() => setCurrentView('forge')} 
-            className={`w-full text-left px-4 py-3 rounded-xl transition-all ${currentView === 'forge' ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'}`}
-          >
-            Persona Forge
-          </button>
-          <button 
-            onClick={() => setCurrentView('adventure')} 
-            className={`w-full text-left px-4 py-3 rounded-xl transition-all ${currentView === 'adventure' ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'}`}
-          >
-            Adventure RPG
-          </button>
+        <div className="flex items-center space-x-2 mb-8">
+          <div className="text-2xl font-light text-indigo-400 tracking-widest">JANUS</div>
+          {incognito && (
+            <span className="text-xs bg-rose-900/30 border border-rose-500/30 text-rose-400 px-1.5 py-0.5 rounded-full">
+              🕶 Incognito
+            </span>
+          )}
         </div>
 
+        <div className="space-y-4">
+          {navBtn('home', 'System Core')}
+          {navBtn('forge', 'Persona Forge')}
+          {navBtn('adventure', 'Adventure RPG')}
+        </div>
+
+        {/* Engine Status */}
         <div className="mt-auto space-y-2 pt-8 border-t border-gray-800">
           <div className="text-xs text-gray-500 uppercase tracking-widest mb-3">Engine Status</div>
           <div className="flex items-center text-sm">
-            <span className={`w-2 h-2 rounded-full mr-3 ${engineStatus.gpu ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-red-500'}`}></span>
+            <span className={`w-2 h-2 rounded-full mr-3 transition-colors ${engineDot(engineStatus.gpu)}`} />
             <span className={engineStatus.gpu ? 'text-gray-300' : 'text-gray-600'}>GPU (11434)</span>
           </div>
           <div className="flex items-center text-sm">
-            <span className={`w-2 h-2 rounded-full mr-3 ${engineStatus.cpu ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-red-500'}`}></span>
+            <span className={`w-2 h-2 rounded-full mr-3 transition-colors ${engineDot(engineStatus.cpu)}`} />
             <span className={engineStatus.cpu ? 'text-gray-300' : 'text-gray-600'}>CPU (11435)</span>
           </div>
         </div>
@@ -80,4 +106,10 @@ function App() {
   );
 }
 
-export default App;
+export default function App() {
+  return (
+    <AppProvider>
+      <AppShell />
+    </AppProvider>
+  );
+}
