@@ -199,8 +199,16 @@ export default function Home() {
       }
 
       let gotToken = false;
+      let streamInterrupted = false;
+      let streamErrorMessage = '';
+
       for await (const data of sseStream(response)) {
         if (controller.signal.aborted) break;
+        if (data.error) {
+          streamInterrupted = true;
+          streamErrorMessage = data.error;
+          setError(data.error);
+        }
         if (data.token) {
           gotToken = true;
           setMessages(prev => prev.map(m =>
@@ -212,7 +220,16 @@ export default function Home() {
         if (data.done) break;
       }
 
-      if (!gotToken) {
+      if (streamInterrupted) {
+        setMessages(prev => prev.map(m =>
+          m.id === assistantMsgId
+            ? {
+                ...m,
+                content: (m.content ? `${m.content}\n\n` : '') + `*[Interrupted: ${streamErrorMessage || 'Stream terminated prematurely'}]*`,
+              }
+            : m
+        ));
+      } else if (!gotToken) {
         setMessages(prev => prev.map(m =>
           m.id === assistantMsgId
             ? { ...m, content: '*Janus is offline or did not respond.*' }

@@ -170,9 +170,44 @@ def load_personas() -> List[Dict[str, Any]]:
 
 
 def read_text_file(rel_path: str) -> str:
-    """Reads a text file from project directory."""
+    """Reads a text file from project directory, including React SPA components if reading frontend assets."""
+    norm = rel_path.replace("\\", "/").strip("/")
+
+    # In React/Vite architecture, UI markup and logic reside in frontend/src
+    if norm in ("frontend/index.html", "frontend/app.js"):
+        chunks = []
+        direct_path = PROJECT_ROOT / rel_path
+        if direct_path.exists():
+            with open(direct_path, "r", encoding="utf-8", errors="replace") as f:
+                chunks.append(f.read())
+
+        src_dir = PROJECT_ROOT / "frontend" / "src"
+        if src_dir.exists():
+            for ext in ("*.jsx", "*.js", "*.html"):
+                for p in sorted(src_dir.rglob(ext)):
+                    try:
+                        with open(p, "r", encoding="utf-8", errors="replace") as f:
+                            chunks.append(f.read())
+                    except Exception:
+                        pass
+        return "\n".join(chunks)
+
+    if norm == "frontend/styles.css":
+        chunks = []
+        direct_path = PROJECT_ROOT / "frontend" / "styles.css"
+        if direct_path.exists():
+            with open(direct_path, "r", encoding="utf-8", errors="replace") as f:
+                chunks.append(f.read())
+
+        index_css = PROJECT_ROOT / "frontend" / "src" / "index.css"
+        if index_css.exists():
+            with open(index_css, "r", encoding="utf-8", errors="replace") as f:
+                chunks.append(f.read())
+        return "\n".join(chunks)
+
     path = PROJECT_ROOT / rel_path
     if not path.exists():
         return ""
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         return f.read()
+

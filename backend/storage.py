@@ -60,7 +60,8 @@ class WorkContextSchema(BaseModel):
 
 class PersonaSchema(BaseModel):
     id: str = Field(default_factory=lambda: f"persona_{uuid.uuid4().hex[:6]}")
-    name: str
+    name: Optional[str] = "Persona"
+    character_name: Optional[str] = None
     tagline: Optional[str] = "Custom Persona"
     system_prompt: Optional[str] = "You are a custom persona."
     greeting: Optional[str] = "Greetings."
@@ -186,12 +187,23 @@ def set_data_dir(data_dir: Path | str | None) -> None:
 
 
 def get_file_lock(file_path: Path | str) -> asyncio.Lock:
-    """Return the canonical asyncio.Lock corresponding to the target file path."""
+    """Return the canonical asyncio.Lock corresponding to the target file path, refreshing if loop changed."""
     resolved_key = str(Path(file_path).resolve())
     with _LOCK_REGISTRY_LOCK:
-        if resolved_key not in _LOCKS:
-            _LOCKS[resolved_key] = asyncio.Lock()
-        return _LOCKS[resolved_key]
+        curr_lock = _LOCKS.get(resolved_key)
+        try:
+            curr_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            curr_loop = None
+
+        if curr_lock is not None and curr_loop is not None:
+            if getattr(curr_lock, "_loop", None) not in (None, curr_loop):
+                curr_lock = None
+
+        if curr_lock is None:
+            curr_lock = asyncio.Lock()
+            _LOCKS[resolved_key] = curr_lock
+        return curr_lock
 
 
 # ----------------------------------------------------------------------
@@ -451,6 +463,32 @@ async def update_reminder(reminder_id: str, updates: dict[str, Any]) -> dict[str
     return None
 
 
+async def delete_reminder(reminder_id: str) -> bool:
+    """
+    Delete an existing reminder by id.
+    Returns True if found and deleted, False otherwise.
+    """
+    reminders_path = get_data_dir() / "reminders.json"
+    lock = get_file_lock(reminders_path)
+
+    async with lock:
+        current_data = await asyncio.to_thread(_sync_read, reminders_path, lambda: [r.copy() for r in DEFAULT_REMINDERS])
+        if isinstance(current_data, dict) and "reminders" in current_data:
+            items = list(current_data["reminders"])
+        elif isinstance(current_data, list):
+            items = list(current_data)
+        else:
+            items = []
+
+        initial_len = len(items)
+        items = [item for item in items if not (isinstance(item, dict) and item.get("id") == reminder_id)]
+        if len(items) < initial_len:
+            await asyncio.to_thread(_sync_atomic_write, reminders_path, items)
+            return True
+
+    return False
+
+
 async def load_work_context() -> list[dict[str, Any]]:
     """Load rolling work context notes from data/work_context.json (up to 15 items)."""
     context_path = get_data_dir() / "work_context.json"
@@ -538,6 +576,10 @@ async def load_personas() -> list[dict[str, Any]]:
         try:
             data = await safe_read_json(jf)
             if isinstance(data, dict):
+                if not data.get("name") and data.get("character_name"):
+                    data["name"] = data["character_name"]
+                if not data.get("id") and data.get("name"):
+                    data["id"] = data["name"].lower().replace(" ", "_")
                 personas.append(_model_dump(PersonaSchema(**data)))
         except Exception as e:
             logger.error("Failed to load persona file %s: %s", jf, e)
@@ -617,10 +659,11 @@ async def get_persona(persona_id: str) -> dict[str, Any] | None:
     return None
 
 
-async def save_persona(persona_data: dict[str, Any]) -> dict[str, Any]:
+async def save_persona(persona_data: dict[str, Any], allow_overwrite: bool = True) -> dict[str, Any]:
     """
     Save or update a persona card under data/personas/{id}.json.
     Enforces schema compliance, path sanitization, and returns the saved persona dictionary.
+    Protects the core 'janus' persona against arbitrary replacement and prevents silent slug collisions.
     """
     personas_dir = get_data_dir() / "personas"
     personas_dir.mkdir(parents=True, exist_ok=True)
@@ -631,8 +674,13 @@ async def save_persona(persona_data: dict[str, Any]) -> dict[str, Any]:
         name_clean = re.sub(r"[^\w-]", "_", name_part)[:48]
         data["id"] = f"{name_clean}_{uuid.uuid4().hex[:6]}"
     else:
-        if not _is_safe_persona_id(str(data["id"])):
+        clean_id = str(data["id"]).strip()
+        if not _is_safe_persona_id(clean_id):
             raise ValueError("Invalid persona_id: path traversal detected")
+        if clean_id.lower() == "janus":
+            char_name = str(data.get("name") or "").strip().lower()
+            if char_name and char_name != "janus":
+                raise ValueError("Core Janus persona cannot be replaced or overwritten by arbitrary personas.")
 
     validated = PersonaSchema(**data)
     dumped = _model_dump(validated)
@@ -643,6 +691,9 @@ async def save_persona(persona_data: dict[str, Any]) -> dict[str, Any]:
         target_path.relative_to(personas_dir.resolve())
     except ValueError:
         raise ValueError("Invalid persona_id: path traversal detected")
+
+    if not allow_overwrite and target_path.exists():
+        raise ValueError(f"Persona with ID '{dumped['id']}' already exists.")
 
     await safe_write_json(target_path, dumped)
     return dumped

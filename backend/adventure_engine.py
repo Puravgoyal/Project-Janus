@@ -33,6 +33,7 @@ class CharacterState(BaseModel):
 
 class AdventureState(BaseModel):
     campaign_id: str = ""
+    version: int = 0
     world_context: AdventureContext = AdventureContext()
     character_state: CharacterState = CharacterState()
     history: List[Dict[str, str]] = []
@@ -40,6 +41,7 @@ class AdventureState(BaseModel):
 class AdventureAction(BaseModel):
     action: str
     incognito: bool = False
+    session_token: Optional[str] = None
 
 class AdventureStart(BaseModel):
     prompt: str = ""
@@ -47,6 +49,7 @@ class AdventureStart(BaseModel):
     tone: str = ""
     nsfw_enabled: bool = False
     incognito: bool = False
+    session_token: Optional[str] = None
     starting_equipment: str = ""
     forbidden_magic_tech: str = ""
     pacing: str = ""
@@ -59,9 +62,50 @@ class ExtractedState(BaseModel):
     completed_quests: List[str] = []
 
 # Per-session incognito state: maps session_token -> AdventureState
-# Using a simple dict; entries are created on start and last for the process lifetime.
-# NOT a global singleton — each new incognito start creates a fresh entry.
+# Bounded in-memory dictionary; entries are isolated per session token.
 _INCOGNITO_SESSIONS: Dict[str, AdventureState] = {}
+_STATE_LOCKS: Dict[str, asyncio.Lock] = {}
+
+# Guards atomic replacement of the persistent campaign.
+# adventure_start acquires this as a writer; append_action_history /
+# extract_mechanics acquire it as readers (via asyncio.Lock — single writer
+# excludes all concurrent readers and writers alike).
+_REPLACEMENT_LOCK: Optional[asyncio.Lock] = None
+_REPLACEMENT_LOCK_LOOP: Optional[object] = None
+
+
+def get_replacement_lock() -> asyncio.Lock:
+    global _REPLACEMENT_LOCK, _REPLACEMENT_LOCK_LOOP
+    try:
+        curr_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        curr_loop = None
+
+    if _REPLACEMENT_LOCK is not None and curr_loop is not None:
+        if _REPLACEMENT_LOCK_LOOP not in (None, curr_loop):
+            _REPLACEMENT_LOCK = None
+
+    if _REPLACEMENT_LOCK is None:
+        _REPLACEMENT_LOCK = asyncio.Lock()
+        _REPLACEMENT_LOCK_LOOP = curr_loop
+    return _REPLACEMENT_LOCK
+
+
+def get_state_lock(key: str) -> asyncio.Lock:
+    curr_lock = _STATE_LOCKS.get(key)
+    try:
+        curr_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        curr_loop = None
+
+    if curr_lock is not None and curr_loop is not None:
+        if getattr(curr_lock, "_loop", None) not in (None, curr_loop):
+            curr_lock = None
+
+    if curr_lock is None:
+        curr_lock = asyncio.Lock()
+        _STATE_LOCKS[key] = curr_lock
+    return curr_lock
 
 # Active persistent campaign_id — used to detect stale delayed extractions
 _ACTIVE_CAMPAIGN_ID: str = ""
@@ -69,9 +113,12 @@ _ACTIVE_CAMPAIGN_ID: str = ""
 def get_state_path() -> Path:
     return storage.get_data_dir() / "adventure_state.json"
 
-async def get_state(incognito: bool, session_token: str = "") -> AdventureState:
+async def get_state(incognito: bool, session_token: Optional[str] = None) -> AdventureState:
     if incognito:
-        return _INCOGNITO_SESSIONS.get(session_token, AdventureState())
+        clean_token = (session_token or "").strip()
+        if not clean_token or clean_token not in _INCOGNITO_SESSIONS:
+            return AdventureState()
+        return _INCOGNITO_SESSIONS[clean_token]
 
     state_path = get_state_path()
     try:
@@ -83,13 +130,113 @@ async def get_state(incognito: bool, session_token: str = "") -> AdventureState:
         logger.error(f"Error reading adventure state: {e}")
         return AdventureState()
 
-async def save_state(state: AdventureState, incognito: bool, session_token: str = ""):
-    if incognito:
-        _INCOGNITO_SESSIONS[session_token] = state
-        return
+async def replace_persistent_campaign(state: AdventureState) -> AdventureState:
+    """
+    Atomically sets the active persistent campaign and writes its initial state.
+    Acquires _REPLACEMENT_LOCK so ongoing or delayed action updates/extractions from
+    an older campaign cannot interleave or overwrite.
+    """
+    global _ACTIVE_CAMPAIGN_ID
+    async with get_replacement_lock():
+        _ACTIVE_CAMPAIGN_ID = state.campaign_id
+        state.version = 1
+        state_path = get_state_path()
+        await storage.safe_write_json(state_path, state.dict())
+        return state
 
-    state_path = get_state_path()
-    await storage.safe_write_json(state_path, state.dict())
+async def save_state_guarded(
+    state: AdventureState,
+    incognito: bool,
+    session_token: Optional[str] = None,
+    expected_campaign_id: Optional[str] = None,
+    expected_version: Optional[int] = None,
+) -> bool:
+    """
+    Guarded persistence write.
+    For incognito sessions, updates memory state for the isolated session token.
+    For persistent campaigns, atomically checks that the active campaign ID and disk version
+    still match expected_campaign_id / expected_version under get_replacement_lock() before writing.
+    Returns True if successfully written, False if rejected due to campaign replacement.
+    """
+    if incognito:
+        clean_token = (session_token or "").strip()
+        if not clean_token:
+            raise ValueError("session_token is required for incognito adventure persistence")
+        state.version += 1
+        if len(_INCOGNITO_SESSIONS) > 100:
+            oldest_key = next(iter(_INCOGNITO_SESSIONS))
+            _INCOGNITO_SESSIONS.pop(oldest_key, None)
+        _INCOGNITO_SESSIONS[clean_token] = state
+        return True
+
+    async with get_replacement_lock():
+        if expected_campaign_id is not None:
+            if expected_campaign_id != _ACTIVE_CAMPAIGN_ID:
+                logger.warning(
+                    "Guarded write rejected: active campaign is %s, expected %s",
+                    _ACTIVE_CAMPAIGN_ID, expected_campaign_id
+                )
+                return False
+            current = await get_state(incognito=False)
+            if current.campaign_id != expected_campaign_id:
+                logger.warning(
+                    "Guarded write rejected: disk campaign is %s, expected %s",
+                    current.campaign_id, expected_campaign_id
+                )
+                return False
+            if expected_version is not None and current.version != expected_version:
+                logger.warning(
+                    "Guarded write rejected: disk version is %s, expected %s",
+                    current.version, expected_version
+                )
+                return False
+
+        state.version += 1
+        state_path = get_state_path()
+        await storage.safe_write_json(state_path, state.dict())
+        return True
+
+async def save_state(state: AdventureState, incognito: bool, session_token: Optional[str] = None):
+    await save_state_guarded(state, incognito, session_token=session_token)
+
+async def append_action_history(
+    action: str,
+    reply: str,
+    incognito: bool,
+    session_token: Optional[str] = None,
+    campaign_id: str = ""
+) -> Optional[AdventureState]:
+    """Atomically append a user-action / assistant-reply turn to the latest campaign state.
+    Persistence is guarded atomically in save_state_guarded against concurrent campaign replacement.
+    """
+    clean_token = (session_token or "").strip()
+    lock_key = clean_token if incognito else (campaign_id or "persistent")
+
+    async with get_state_lock(lock_key):
+        state = await get_state(incognito, clean_token)
+        # Discard if this action belonged to an old campaign that has since been replaced
+        if campaign_id and state.campaign_id and campaign_id != state.campaign_id:
+            logger.warning("Discarding action history for replaced campaign %s", campaign_id)
+            return None
+        if not incognito and campaign_id and _ACTIVE_CAMPAIGN_ID and campaign_id != _ACTIVE_CAMPAIGN_ID:
+            logger.warning("Discarding action history for inactive campaign %s", campaign_id)
+            return None
+
+        expected_version = state.version
+        state.history.append({"role": "user", "content": action})
+        state.history.append({"role": "assistant", "content": reply})
+        if len(state.history) > 10:
+            state.history = state.history[-10:]
+        saved = await save_state_guarded(
+            state,
+            incognito,
+            clean_token,
+            expected_campaign_id=campaign_id if not incognito else None,
+            expected_version=expected_version if not incognito else None,
+        )
+        if not saved:
+            return None
+        return state
 
 def generate_dm_prompt(state: AdventureState, current_roll: int = None) -> str:
     ctx = state.world_context
@@ -182,45 +329,62 @@ async def extract_mechanics(action: str, response: str, incognito: bool,
                 logger.error("Failed to parse extraction JSON: %s | raw: %r", e, content[:200])
                 return
 
-            # Campaign version check: skip if this extraction belongs to an old campaign
-            if not incognito:
-                if campaign_id and _ACTIVE_CAMPAIGN_ID and campaign_id != _ACTIVE_CAMPAIGN_ID:
-                    logger.warning(
-                        "Discarding stale extraction for campaign %s (active: %s)",
-                        campaign_id, _ACTIVE_CAMPAIGN_ID
+            clean_token = (session_token or "").strip()
+            lock_key = clean_token if incognito else (campaign_id or "persistent")
+
+            async def _do_extract_apply():
+                async with get_state_lock(lock_key):
+                    # Load current state for atomic read-modify-write
+                    state = await get_state(incognito, clean_token)
+
+                    # Campaign identity check: skip if this extraction belongs to an old or replaced campaign
+                    if campaign_id and state.campaign_id and campaign_id != state.campaign_id:
+                        logger.warning(
+                            "Discarding stale extraction for campaign %s (current: %s)",
+                            campaign_id, state.campaign_id
+                        )
+                        return
+
+                    if not incognito and campaign_id and _ACTIVE_CAMPAIGN_ID and campaign_id != _ACTIVE_CAMPAIGN_ID:
+                        logger.warning(
+                            "Discarding stale extraction for campaign %s (active: %s)",
+                            campaign_id, _ACTIVE_CAMPAIGN_ID
+                        )
+                        return
+
+                    expected_version = state.version
+                    char = state.character_state
+
+                    if ext.health_update and ext.health_update.strip():
+                        char.health = ext.health_update.strip()
+
+                    for item in ext.inventory_added:
+                        if item and item not in char.inventory:
+                            char.inventory.append(item)
+
+                    for item in ext.inventory_removed:
+                        if item in char.inventory:
+                            char.inventory.remove(item)
+
+                    for q in ext.new_quests:
+                        if q and q not in char.active_quests:
+                            char.active_quests.append(q)
+
+                    for q in ext.completed_quests:
+                        if q in char.active_quests:
+                            char.active_quests.remove(q)
+
+                    saved = await save_state_guarded(
+                        state,
+                        incognito,
+                        clean_token,
+                        expected_campaign_id=campaign_id if not incognito else None,
+                        expected_version=expected_version if not incognito else None,
                     )
-                    return
+                    if not saved:
+                        logger.warning("Extraction state write rejected due to replaced campaign %s", campaign_id)
 
-            # Load current state for atomic read-modify-write
-            state = await get_state(incognito, session_token)
-
-            # Second campaign check after load (race condition guard)
-            if not incognito and campaign_id and state.campaign_id and campaign_id != state.campaign_id:
-                logger.warning("Stale extraction discarded after state reload")
-                return
-
-            char = state.character_state
-
-            if ext.health_update and ext.health_update.strip():
-                char.health = ext.health_update
-
-            for item in ext.inventory_added:
-                if item and item not in char.inventory:
-                    char.inventory.append(item)
-
-            for item in ext.inventory_removed:
-                if item in char.inventory:
-                    char.inventory.remove(item)
-
-            for q in ext.new_quests:
-                if q and q not in char.active_quests:
-                    char.active_quests.append(q)
-
-            for q in ext.completed_quests:
-                if q in char.active_quests:
-                    char.active_quests.remove(q)
-
-            await save_state(state, incognito, session_token)
+            await _do_extract_apply()
 
     except (httpx.ConnectError, httpx.TimeoutException) as conn_err:
         logger.debug("CPU engine unavailable for extraction: %s", conn_err)

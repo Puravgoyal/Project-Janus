@@ -55,9 +55,17 @@ const msgId = () => `msg_${Date.now()}_${Math.random().toString(36).slice(2)}`;
  * PersonaChat — a per-persona inline chat panel
  */
 function PersonaChat({ persona, onClose }) {
-  const { incognito, getPersonaHistory, setPersonaHistoryForMode } = useApp();
-  const history = getPersonaHistory(persona.id);
-  const setHistory = (updater) => setPersonaHistoryForMode(persona.id, updater);
+  const { incognito: globalIncognito, getPersonaHistory, setPersonaHistoryForMode } = useApp();
+  const isDisposable = Boolean(persona.is_disposable || persona.incognito);
+  const effectiveIncognito = isDisposable || globalIncognito;
+
+  // Disposable conversations use isolated local history that never writes to persistent persona storage
+  const [localHistory, setLocalHistory] = useState(() => (
+    persona.greeting ? [{ id: msgId(), role: 'assistant', content: persona.greeting }] : []
+  ));
+
+  const history = isDisposable ? localHistory : getPersonaHistory(persona.id);
+  const setHistory = isDisposable ? setLocalHistory : ((updater) => setPersonaHistoryForMode(persona.id, updater));
 
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -114,7 +122,7 @@ function PersonaChat({ persona, onClose }) {
           mode: 'persona',
           persona_id: persona.id,
           persona,
-          incognito,
+          incognito: effectiveIncognito,
           history: historyToSend,
         }),
       });
@@ -127,6 +135,16 @@ function PersonaChat({ persona, onClose }) {
       let gotToken = false;
       for await (const data of sseStream(response)) {
         if (controller.signal.aborted) break;
+        if (data.error) {
+          setError(data.error);
+          setHistory(prev => prev.map(m =>
+            m.id === assistantMsgId
+              ? { ...m, content: `*Error: ${data.error}*` }
+              : m
+          ));
+          gotToken = true;
+          break;
+        }
         if (data.token) {
           gotToken = true;
           setHistory(prev => prev.map(m =>
@@ -234,6 +252,7 @@ export default function PersonaForge() {
   const [formError, setFormError] = useState('');
   const [saving, setSaving] = useState(false);
   const [enhancing, setEnhancing] = useState(false);
+  const [enhancedCharData, setEnhancedCharData] = useState(null);
 
   // Forge form state
   const [name, setName] = useState('');
@@ -301,6 +320,7 @@ export default function PersonaForge() {
       if (res.ok) {
         const data = await res.json();
         const char = data.character || {};
+        setEnhancedCharData(char);
         if (char.name) setName(char.name);
         if (char.personality?.archetype) setDescription(char.personality.archetype);
         if (char.personality?.core_traits) {
@@ -329,7 +349,11 @@ export default function PersonaForge() {
       const res = await fetch(`${API_BASE}/api/personas/compile`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ character_name: wikiName.trim(), raw_text: wikiText.trim() }),
+        body: JSON.stringify({
+          character_name: wikiName.trim(),
+          raw_text: wikiText.trim(),
+          incognito: Boolean(incognito),
+        }),
       });
       if (res.ok) {
         setIsWikiModalOpen(false);
@@ -355,37 +379,50 @@ export default function PersonaForge() {
     ];
 
     const baseFields = editingPersona ? { ...editingPersona } : {};
+    const enhanced = enhancedCharData || {};
 
-    return {
+    const personalityObj = {
+      archetype: targetDesc || enhanced.personality?.archetype || baseFields.forge_schema?.personality?.archetype || targetName.trim(),
+      core_traits: personalityTraits,
+      flaws: enhanced.personality?.flaws || baseFields.forge_schema?.personality?.flaws || ['Reserved'],
+    };
+
+    const emotionObj = enhanced.emotion || baseFields.forge_schema?.emotion || {
+      default_mood: 'Composed',
+      reaction_to_stress: 'Focused',
+      speech_style: 'Clear and deliberate',
+    };
+
+    const physicalityObj = enhanced.physicality || baseFields.forge_schema?.physicality || {
+      appearance: 'Distinctive demeanor',
+      body_language: 'Balanced and purposeful',
+    };
+
+    const matureObj = enhanced.mature_themes || baseFields.forge_schema?.mature_themes || {
+      nsfw_enabled: false,
+      boundaries: '',
+      mature_dynamics: '',
+    };
+
+    const characterObj = {
       ...baseFields,
       name: targetName.trim(),
       description: targetDesc,
       traits: targetTags ? targetTags.split(',').map(t => t.trim()).filter(Boolean) : [],
-      personality: {
-        ...(typeof baseFields.personality === 'object' && !Array.isArray(baseFields.personality)
-          ? baseFields.personality
-          : {}),
-        archetype: baseFields.tagline || targetName.trim(),
-        core_traits: personalityTraits,
-        flaws: baseFields.forge_schema?.personality?.flaws || ['Reserved'],
-      },
-      emotion: baseFields.forge_schema?.emotion || {
-        default_mood: 'Composed',
-        reaction_to_stress: 'Focused',
-        speech_style: 'Clear and deliberate',
-      },
-      physicality: baseFields.forge_schema?.physicality || {
-        appearance: 'Distinctive demeanor',
-        body_language: 'Balanced and purposeful',
-      },
-      mature_themes: baseFields.forge_schema?.mature_themes || {
-        nsfw_enabled: false,
-        boundaries: '',
-        mature_dynamics: '',
-      },
-      roleplay_style: targetRoleplay || baseFields.roleplay_style || '',
+      personality: personalityObj,
+      emotion: emotionObj,
+      physicality: physicalityObj,
+      mature_themes: matureObj,
+      roleplay_style: targetRoleplay || enhanced.roleplay_style || baseFields.roleplay_style || '',
       _slider_values: targetSliders,
     };
+
+    characterObj.forge_schema = {
+      ...characterObj,
+      _slider_values: targetSliders,
+    };
+
+    return characterObj;
   };
 
   const handleSave = async () => {
@@ -395,11 +432,16 @@ export default function PersonaForge() {
     }
     if (saving) return;
 
+    const isEdit = Boolean(editingPersona?.id);
+    if (isEdit && incognito) {
+      setFormError('Persistent persona editing is disabled while Incognito is active to protect stored character data. Use "Launch Disposable" instead to test changes.');
+      return;
+    }
+
     setFormError('');
     setSaving(true);
 
     const characterData = buildCharacterData(name, description, tags, sliders, roleplayStyle);
-    const isEdit = Boolean(editingPersona?.id);
     const url = isEdit
       ? `${API_BASE}/api/personas/${editingPersona.id}`
       : `${API_BASE}/api/personas/forge`;
@@ -448,6 +490,8 @@ export default function PersonaForge() {
       if (res.ok) {
         const data = await res.json();
         const ephemeral = data.character || characterData;
+        ephemeral.is_disposable = true;
+        ephemeral.incognito = true;
         setIsModalOpen(false);
         setChatPersona(ephemeral);
       } else {
@@ -482,6 +526,7 @@ export default function PersonaForge() {
 
   const openForge = (persona = null) => {
     setFormError('');
+    setEnhancedCharData(null);
     if (persona) {
       setEditingPersona(persona);
       setName(persona.name || '');
@@ -489,7 +534,7 @@ export default function PersonaForge() {
       setTags((persona.traits || []).join(', '));
       setRoleplayStyle(persona.roleplay_style || '');
 
-      const stored = persona._slider_values;
+      const stored = persona._slider_values || persona.forge_schema?._slider_values;
       if (stored && typeof stored === 'object') {
         setSliders({
           order_chaos: stored.order_chaos ?? 50,

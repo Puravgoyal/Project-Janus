@@ -14,6 +14,7 @@ import os
 import time
 from pathlib import Path
 from typing import Any, Optional
+import uuid
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, status
@@ -57,7 +58,7 @@ app.add_middleware(
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "Accept"],
+    allow_headers=["*"],
 )
 
 
@@ -81,6 +82,7 @@ class PersonaCompileRequest(BaseModel):
     character_name: Optional[str] = None
     wiki_text: Optional[str] = None
     raw_text: Optional[str] = None
+    incognito: Optional[bool] = False
 
 
 # Background task tracking to prevent garbage collection mid-execution
@@ -255,56 +257,81 @@ async def chat_stream(req: ChatStreamRequest):
             detail="A non-empty user message string or messages array containing a user message is required."
         )
 
-    # 2. Prepare System Prompt Context
+    # 2. Ephemeral Persona Lookup & Privacy Binding
+    is_incognito = bool(req.incognito)
+    if req.persona and isinstance(req.persona, dict):
+        if req.persona.get("incognito") or req.persona.get("is_disposable"):
+            is_incognito = True
+
     active_persona = None
     if req.mode == "persona":
-        if req.persona_id:
-            active_persona = await storage.get_persona(req.persona_id)
-        if active_persona and req.persona and isinstance(req.persona, dict):
-            client_style = memory_engine._extract_roleplay_style(req.persona)
-            disk_style = memory_engine._extract_roleplay_style(active_persona)
-            if client_style:
-                active_persona["roleplay_style"] = client_style
-                if disk_style and disk_style in str(active_persona.get("system_prompt", "")):
-                    active_persona["system_prompt"] = active_persona["system_prompt"].replace(
-                        f"Roleplay Style & Directives: {disk_style}",
-                        f"Roleplay Style & Directives: {client_style}"
-                    )
-            elif disk_style:
-                active_persona["roleplay_style"] = disk_style
-        elif not active_persona and req.persona:
+        # If incognito/disposable persona is provided, do NOT load disk persona by slug
+        if is_incognito and req.persona:
             active_persona = req.persona
+        else:
+            if req.persona_id:
+                active_persona = await storage.get_persona(req.persona_id)
+            if active_persona and req.persona and isinstance(req.persona, dict):
+                client_style = memory_engine._extract_roleplay_style(req.persona)
+                disk_style = memory_engine._extract_roleplay_style(active_persona)
+                if client_style:
+                    active_persona["roleplay_style"] = client_style
+                    if disk_style and disk_style in str(active_persona.get("system_prompt", "")):
+                        active_persona["system_prompt"] = active_persona["system_prompt"].replace(
+                            f"Roleplay Style & Directives: {disk_style}",
+                            f"Roleplay Style & Directives: {client_style}"
+                        )
+                elif disk_style:
+                    active_persona["roleplay_style"] = disk_style
+            elif not active_persona and req.persona:
+                active_persona = req.persona
 
     system_prompt = await memory_engine.inject_context(
         base_system_prompt="",
         mode=req.mode or "assistant",
         persona=active_persona,
-        incognito=bool(req.incognito)
+        incognito=is_incognito
     )
+    if len(system_prompt) > 5000:
+        system_prompt = system_prompt[:5000] + "\n\n[Context truncated for token budget]"
 
-    # 3. Assemble Conversation Turn History for GPU Engine
-    formatted_messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    # 3. Context Budget Accounting (system + input + history <= 14,000 chars)
+    # Bound user input to 4,000 chars
+    bounded_user_text = user_text[:4000] if len(user_text) <= 4000 else user_text[:3960] + " [Input truncated for context limit]"
 
-    history = req.history or []
-    if not history and req.messages and len(req.messages) > 1:
-        history = req.messages[:-1]
+    # Assemble and budget conversation history in reverse
+    history_budget = max(2000, 14000 - len(system_prompt) - len(bounded_user_text))
+    raw_history = req.history or []
+    if not raw_history and req.messages and len(req.messages) > 1:
+        raw_history = req.messages[:-1]
 
-    for item in history:
+    budgeted_history: list[dict[str, str]] = []
+    used_history_chars = 0
+    for item in reversed(raw_history):
         if isinstance(item, dict) and "role" in item and "content" in item:
             role = str(item["role"]).lower()
             if role == "system":
                 continue
-            formatted_messages.append({
-                "role": role,
-                "content": str(item["content"])
-            })
+            content = str(item["content"])
+            # Bound single oversized history turns to 1500 chars
+            if len(content) > 1500:
+                content = content[:1460] + " [truncated]"
+            if used_history_chars + len(content) > history_budget:
+                break
+            budgeted_history.append({"role": role, "content": content})
+            used_history_chars += len(content)
 
-    formatted_messages.append({"role": "user", "content": user_text})
+    formatted_messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    for msg in reversed(budgeted_history):
+        formatted_messages.append(msg)
+    formatted_messages.append({"role": "user", "content": bounded_user_text})
 
-    # 4. SSE Stream Generator
+    # 4. SSE Stream Generator with Robust Model Error Handling
     async def event_generator():
         accumulated_reply = ""
         gpu_connected = False
+        has_error = False
+        completed_normally = False
 
         client_timeout = httpx.Timeout(connect=2.0, read=90.0, write=10.0, pool=5.0)
         try:
@@ -325,6 +352,12 @@ async def chat_stream(req: ChatStreamRequest):
                                 continue
                             try:
                                 chunk = json.loads(line)
+                                if "error" in chunk:
+                                    has_error = True
+                                    logger.error("GPU stream model error: %s", chunk["error"])
+                                    yield f"data: {json.dumps({'error': str(chunk['error']), 'interrupted': True, 'done': True})}\n\n"
+                                    return
+
                                 token = chunk.get("message", {}).get("content", "")
                                 is_done = bool(chunk.get("done", False))
 
@@ -334,38 +367,46 @@ async def chat_stream(req: ChatStreamRequest):
                                     yield f"data: {json.dumps(payload)}\n\n"
 
                                 if is_done:
+                                    completed_normally = True
                                     break
                             except json.JSONDecodeError:
                                 continue
+                    else:
+                        has_error = True
+                        logger.error("GPU engine returned non-200 HTTP %s", stream_resp.status_code)
+                        yield f"data: {json.dumps({'error': f'GPU engine returned HTTP {stream_resp.status_code}', 'interrupted': True, 'done': True})}\n\n"
+                        return
         except (httpx.ConnectError, httpx.TimeoutException, OSError) as conn_err:
-            logger.warning("GPU engine at %s unreachable: %s. Using graceful stream fallback.", GPU_ENGINE_URL, conn_err)
+            logger.warning("GPU engine at %s unreachable: %s.", GPU_ENGINE_URL, conn_err)
+            has_error = True
 
-        # Fallback simulation if GPU engine was offline
-        if not gpu_connected:
+        if not gpu_connected and not accumulated_reply:
             fallback_text = (
-                f"Janus: Acknowledged. Operational directives noted for '{user_text[:40]}'. "
-                f"Dual engine telemetry indicates GPU chat engine is offline."
+                f"[Degraded: GPU chat engine offline on {GPU_ENGINE_URL}]. "
+                f"Ensure Ollama is running and '{CHAT_MODEL}' is loaded."
             )
-            accumulated_reply = fallback_text
-            # Yield in chunks
-            tokens = fallback_text.split(" ")
-            for i, tok in enumerate(tokens):
-                space = " " if i < len(tokens) - 1 else ""
-                payload = {"token": tok + space, "done": False}
-                yield f"data: {json.dumps(payload)}\n\n"
-                await asyncio.sleep(0.01)
+            yield f"data: {json.dumps({'token': fallback_text, 'error': 'GPU offline', 'degraded': True, 'done': True})}\n\n"
+            return
 
-        # Final terminal SSE event
+        if not completed_normally or has_error:
+            logger.warning("Chat stream terminated prematurely without explicit done completion.")
+            yield f"data: {json.dumps({'error': 'Stream terminated prematurely before completion', 'interrupted': True, 'done': True})}\n\n"
+            return
+
+        # Final terminal SSE event for successful stream
         final_payload = {"token": "", "done": True}
         yield f"data: {json.dumps(final_payload)}\n\n"
 
-        # 5. Background Cognitive Triage (Suppressed under Incognito mode)
-        if not req.incognito:
-            triage_task = asyncio.create_task(
-                _bounded_triage(user_text, accumulated_reply, req.mode or "assistant")
-            )
-            background_tasks.add(triage_task)
-            triage_task.add_done_callback(_on_task_done)
+        # 5. Background Cognitive Triage (Suppressed under Incognito mode or on failed/degraded/interrupted turns)
+        if not is_incognito and gpu_connected and not has_error and completed_normally and accumulated_reply.strip():
+            if len(background_tasks) < 25:
+                triage_task = asyncio.create_task(
+                    _bounded_triage(bounded_user_text, accumulated_reply, req.mode or "assistant")
+                )
+                background_tasks.add(triage_task)
+                triage_task.add_done_callback(_on_task_done)
+            else:
+                logger.warning("Background triage dropped due to pending queue capacity limit.")
 
 
     return StreamingResponse(
@@ -395,7 +436,7 @@ async def compile_persona(req: PersonaCompileRequest):
         )
 
     try:
-        card = await persona_compiler.compile_wiki_to_card(raw_text, character_name)
+        card = await persona_compiler.compile_wiki_to_card(raw_text, character_name, incognito=bool(req.incognito))
         return {
             "status": "success",
             "persona": card
@@ -547,6 +588,10 @@ async def adventure_start(req: adventure_engine.AdventureStart):
     state.world_context.forbidden_magic_tech = req.forbidden_magic_tech
     state.world_context.pacing = req.pacing
 
+    session_token = (req.session_token or "").strip()
+    if req.incognito and not session_token:
+        session_token = f"sess_{uuid.uuid4().hex}"
+
     # Initialize equipment consistently from campaign starting equipment
     if req.starting_equipment:
         items = [i.strip() for i in req.starting_equipment.split(",") if i.strip()]
@@ -583,26 +628,49 @@ async def adventure_start(req: adventure_engine.AdventureStart):
             detail="The Game Master failed to generate an opening scene. Ensure GPU engine is running and model is loaded."
         )
 
-    if not req.incognito:
-        adventure_engine._ACTIVE_CAMPAIGN_ID = campaign_id
-
     state.history.append({"role": "user", "content": "Start campaign"})
     state.history.append({"role": "assistant", "content": opening_scene})
 
-    await adventure_engine.save_state(state, req.incognito)
-    return {"status": "success", "campaign_id": campaign_id, "opening_scene": opening_scene}
+    if not req.incognito:
+        await adventure_engine.replace_persistent_campaign(state)
+    else:
+        await adventure_engine.save_state(state, req.incognito, session_token=session_token)
+
+    return {
+        "status": "success",
+        "campaign_id": campaign_id,
+        "opening_scene": opening_scene,
+        "session_token": session_token if req.incognito else None
+    }
 
 
 @app.get("/api/adventure/state", status_code=status.HTTP_200_OK)
-async def adventure_get_state(incognito: bool = False):
-    state = await adventure_engine.get_state(incognito)
+async def adventure_get_state(incognito: bool = False, session_token: Optional[str] = None):
+    clean_token = (session_token or "").strip()
+    if incognito and not clean_token:
+        return adventure_engine.AdventureState().dict()
+    state = await adventure_engine.get_state(incognito, clean_token)
     return state.dict()
 
 
 @app.post("/api/adventure/action")
 async def adventure_action(req: adventure_engine.AdventureAction):
     import random
-    state = await adventure_engine.get_state(req.incognito)
+    clean_token = (req.session_token or "").strip()
+    if req.incognito and not clean_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="session_token is required for incognito adventure action."
+        )
+
+    state = await adventure_engine.get_state(req.incognito, clean_token)
+    current_cid = state.campaign_id
+    if not current_cid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active campaign found to take action in."
+        )
+
     roll = random.randint(1, 20)
     system_prompt = adventure_engine.generate_dm_prompt(state, roll)
 
@@ -614,6 +682,7 @@ async def adventure_action(req: adventure_engine.AdventureAction):
 
     async def event_generator():
         accumulated_reply = ""
+        completed_normally = False
         try:
             async with httpx.AsyncClient(timeout=90.0) as client:
                 async with client.stream(
@@ -631,6 +700,10 @@ async def adventure_action(req: adventure_engine.AdventureAction):
                                 continue
                             try:
                                 chunk = json.loads(line)
+                                if "error" in chunk:
+                                    logger.error("Model stream error: %s", chunk["error"])
+                                    yield f"data: {json.dumps({'error': chunk['error'], 'interrupted': True, 'done': True})}\n\n"
+                                    return
                                 token = chunk.get("message", {}).get("content", "")
                                 is_done = bool(chunk.get("done", False))
 
@@ -640,39 +713,61 @@ async def adventure_action(req: adventure_engine.AdventureAction):
                                     yield f"data: {json.dumps(payload)}\n\n"
 
                                 if is_done:
+                                    completed_normally = True
                                     break
                             except json.JSONDecodeError:
                                 continue
+                    else:
+                        logger.error("GPU returned HTTP %s", stream_resp.status_code)
+                        yield f"data: {json.dumps({'error': f'GPU returned HTTP {stream_resp.status_code}', 'interrupted': True, 'done': True})}\n\n"
+                        return
         except Exception as e:
             logger.warning(f"Adventure GPU offline: {e}")
-            yield f"data: {json.dumps({'token': '*The Dungeon Master is asleep...*', 'done': True})}\n\n"
+            if not accumulated_reply:
+                yield f"data: {json.dumps({'token': '*The Dungeon Master is asleep...*', 'done': True})}\n\n"
+            else:
+                yield f"data: {json.dumps({'error': f'Adventure stream interrupted: {e}', 'interrupted': True, 'done': True})}\n\n"
+            return
+
+        if not completed_normally:
+            logger.warning("Adventure stream terminated prematurely before done:true")
+            yield f"data: {json.dumps({'error': 'Adventure stream terminated prematurely before completion', 'interrupted': True, 'done': True})}\n\n"
             return
 
         final_payload = {"token": "", "done": True}
         yield f"data: {json.dumps(final_payload)}\n\n"
 
-        # Do not record empty turns
+        # Do not record empty or interrupted turns
         if accumulated_reply.strip():
-            state.history.append({"role": "user", "content": req.action})
-            state.history.append({"role": "assistant", "content": accumulated_reply})
-            if len(state.history) > 10:
-                state.history = state.history[-10:]
-            await adventure_engine.save_state(state, req.incognito)
+            updated_state = await adventure_engine.append_action_history(
+                req.action,
+                accumulated_reply,
+                req.incognito,
+                session_token=clean_token,
+                campaign_id=current_cid
+            )
 
-            # Trigger CPU background task bounded by semaphore
-            current_cid = state.campaign_id
-            async def _bg_mechanics():
-                async with _EXTRACTION_SEMAPHORE:
-                    try:
-                        await adventure_engine.extract_mechanics(
-                            req.action, accumulated_reply, req.incognito, campaign_id=current_cid
-                        )
-                    except Exception as exc:
-                        logger.error("Mechanics extraction failed: %s", exc)
+            # Trigger CPU background task bounded by queue and semaphore
+            if updated_state is not None:
+                async def _bg_mechanics():
+                    async with _EXTRACTION_SEMAPHORE:
+                        try:
+                            await adventure_engine.extract_mechanics(
+                                req.action,
+                                accumulated_reply,
+                                req.incognito,
+                                session_token=clean_token,
+                                campaign_id=current_cid
+                            )
+                        except Exception as exc:
+                            logger.error("Mechanics extraction failed: %s", exc)
 
-            bg_task = asyncio.create_task(_bg_mechanics())
-            background_tasks.add(bg_task)
-            bg_task.add_done_callback(_on_task_done)
+                if len(background_tasks) < 25:
+                    bg_task = asyncio.create_task(_bg_mechanics())
+                    background_tasks.add(bg_task)
+                    bg_task.add_done_callback(_on_task_done)
+                else:
+                    logger.warning("Background mechanics extraction dropped due to queue overload.")
 
     return StreamingResponse(
         event_generator(),
@@ -681,15 +776,144 @@ async def adventure_action(req: adventure_engine.AdventureAction):
 
 
 @app.put("/api/personas/{name}")
-async def update_persona(name: str, request: Request):
+async def update_persona(name: str, request: Request, incognito: Optional[bool] = False):
     data = await request.json()
     data["id"] = name  # Ensure ID matches the route
 
+    # Check for incognito flag in query params or JSON body
+    is_incognito = incognito or bool(data.get("incognito", False))
+
+    # Core Janus protection
+    if name.lower() == "janus":
+        char_name = str(data.get("name") or "").strip().lower()
+        if char_name and char_name != "janus":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The core Janus persona cannot be replaced or overwritten by arbitrary personas."
+            )
+
+    # Regenerate canonical system_prompt when behavioral/identity fields change
+    existing_persona = await storage.get_persona(name)
+
+    char_name = str(data.get("name") or (existing_persona.get("name") if existing_persona else name)).strip()
+    char_desc = str(data.get("description") or "").strip()
+    raw_traits = data.get("traits") or data.get("personality_traits") or []
+    if isinstance(raw_traits, str):
+        traits = [t.strip() for t in raw_traits.split(",") if t.strip()]
+    elif isinstance(raw_traits, (list, tuple)):
+        traits = [str(t).strip() for t in raw_traits if str(t).strip()]
+    else:
+        traits = []
+
+    roleplay_style = memory_engine._extract_roleplay_style(data)
+    forge_schema = data.get("forge_schema") if isinstance(data.get("forge_schema"), dict) else {}
+    personality = forge_schema.get("personality") or data.get("personality") or {}
+    emotion = forge_schema.get("emotion") or data.get("emotion") or {}
+    physicality = forge_schema.get("physicality") or data.get("physicality") or {}
+    mature = forge_schema.get("mature_themes") or data.get("mature_themes") or {}
+
+    needs_prompt_regen = False
+    if not data.get("system_prompt"):
+        needs_prompt_regen = True
+    elif existing_persona:
+        old_name = str(existing_persona.get("name") or "").strip()
+        old_desc = str(existing_persona.get("description") or "").strip()
+        old_traits = existing_persona.get("traits") or existing_persona.get("personality_traits") or []
+        if isinstance(old_traits, str):
+            old_traits = [t.strip() for t in old_traits.split(",") if t.strip()]
+        elif isinstance(old_traits, (list, tuple)):
+            old_traits = [str(t).strip() for t in old_traits if str(t).strip()]
+        else:
+            old_traits = []
+
+        old_roleplay = memory_engine._extract_roleplay_style(existing_persona)
+        old_forge = existing_persona.get("forge_schema") if isinstance(existing_persona.get("forge_schema"), dict) else {}
+        old_personality = old_forge.get("personality") or existing_persona.get("personality") or {}
+        old_emotion = old_forge.get("emotion") or existing_persona.get("emotion") or {}
+        old_physicality = old_forge.get("physicality") or existing_persona.get("physicality") or {}
+        old_mature = old_forge.get("mature_themes") or existing_persona.get("mature_themes") or {}
+
+        if (
+            char_name != old_name
+            or char_desc != old_desc
+            or traits != old_traits
+            or roleplay_style != old_roleplay
+            or personality != old_personality
+            or emotion != old_emotion
+            or physicality != old_physicality
+            or mature != old_mature
+            or forge_schema != old_forge
+            or data.get("_slider_values") != existing_persona.get("_slider_values")
+        ):
+            needs_prompt_regen = True
+    else:
+        needs_prompt_regen = True
+
+    if needs_prompt_regen:
+        raw_arch = personality.get("archetype") if isinstance(personality, dict) else None
+        archetype = str(raw_arch or char_desc or "Character").strip() or "Character"
+        flaws = personality.get("flaws") if isinstance(personality, dict) else []
+        flaws_str = f" Character flaws: {', '.join(str(f) for f in flaws)}." if isinstance(flaws, list) and flaws else ""
+
+        speech = emotion.get("speech_style", "") if isinstance(emotion, dict) else ""
+        mood = emotion.get("default_mood", "") if isinstance(emotion, dict) else ""
+        stress = emotion.get("reaction_to_stress", "") if isinstance(emotion, dict) else ""
+        appearance = physicality.get("appearance", "") if isinstance(physicality, dict) else ""
+        body_lang = physicality.get("body_language", "") if isinstance(physicality, dict) else ""
+        boundaries = mature.get("boundaries", "") if isinstance(mature, dict) else ""
+        mature_dyn = mature.get("mature_dynamics", "") if isinstance(mature, dict) else ""
+
+        prompt_parts = [
+            f"You are {char_name}.",
+            f"Your archetype is {archetype}.",
+        ]
+        if char_desc and char_desc.lower() != archetype.lower():
+            prompt_parts.append(f"About you: {char_desc}.")
+        if traits:
+            prompt_parts.append(f"Core traits: {', '.join(traits)}.")
+        if flaws_str:
+            prompt_parts.append(flaws_str.strip())
+        if speech:
+            prompt_parts.append(f"Your speech style: {speech}.")
+        if mood:
+            prompt_parts.append(f"Your default mood: {mood}.")
+        if stress:
+            prompt_parts.append(f"Under stress you: {stress}.")
+        if appearance:
+            prompt_parts.append(f"Physically: {appearance}.")
+        if body_lang:
+            prompt_parts.append(f"Habitual body language: {body_lang}.")
+        if boundaries:
+            prompt_parts.append(f"Boundaries: {boundaries}.")
+        if mature_dyn:
+            prompt_parts.append(f"Mature dynamics: {mature_dyn}.")
+        if roleplay_style:
+            prompt_parts.append(f"Roleplay Style & Directives: {roleplay_style}")
+
+        prompt_parts.append(
+            "Strong Roleplay Enforcement: Fully embody this character and roleplay style in every response. "
+            "Actively engage in conversation, drive the interaction forward, and ask questions or take initiative without avoiding interaction. "
+            "Never give generic, dismissive, or avoidant AI responses. "
+            "Never break character or refer to yourself as an AI or assistant."
+        )
+        data["system_prompt"] = " ".join(prompt_parts)
+
+    if "_slider_values" in data:
+        if "forge_schema" in data and isinstance(data["forge_schema"], dict):
+            data["forge_schema"]["_slider_values"] = data["_slider_values"]
+
+    if is_incognito:
+        data["saved"] = False
+        data["incognito"] = True
+        return {"status": "success", "persona": data, "saved": False, "incognito": True}
+
     try:
-        updated = await storage.save_persona(data)
-        return {"status": "success", "persona": updated}
+        updated = await storage.save_persona(data, allow_overwrite=True)
+        return {"status": "success", "persona": updated, "saved": True}
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/api/personas/{name}")
@@ -699,6 +923,8 @@ async def delete_persona(name: str):
         if not deleted:
             raise HTTPException(status_code=404, detail="Persona not found")
         return {"status": "success"}
+    except HTTPException:
+        raise
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:

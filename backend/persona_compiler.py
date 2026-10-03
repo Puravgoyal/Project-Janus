@@ -377,7 +377,7 @@ def _fallback_compile_card(character_name: str, raw_text: str) -> dict[str, Any]
     }
 
 
-async def compile_wiki_to_card(raw_text: str, character_name: str) -> dict[str, Any]:
+async def compile_wiki_to_card(raw_text: str, character_name: str, incognito: bool = False) -> dict[str, Any]:
     """
     Asynchronously compile raw text / Wikipedia articles into a structured persona card
     via CPU Ollama engine on Port 11435. Enforces schema compliance, saves to data/personas/{slug}.json,
@@ -476,6 +476,11 @@ async def compile_wiki_to_card(raw_text: str, character_name: str) -> dict[str, 
     compiled_card["personality"] = traits
     compiled_card["personality_traits"] = traits
     compiled_card["roleplay_style"] = str(compiled_card.get("roleplay_style") or "").strip()
+
+    if incognito:
+        compiled_card["saved"] = False
+        compiled_card["incognito"] = True
+        return compiled_card
 
     # Persist the card to data/personas/{slug}.json via storage layer
     saved_card = await storage.save_persona(compiled_card)

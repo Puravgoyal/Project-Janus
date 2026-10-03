@@ -10,7 +10,7 @@ const msgId = () => `msg_${Date.now()}_${Math.random().toString(36).slice(2)}`;
  * AdventureChat — full RPG chat that connects to /api/adventure/action (streaming).
  * Displays state (health, inventory, quests) and supports resuming an adventure.
  */
-function AdventureChat({ openingScene, incognito, onRestart }) {
+function AdventureChat({ openingScene, incognito, sessionToken, onRestart }) {
   const [messages, setMessages] = useState([
     { id: msgId(), role: 'assistant', content: openingScene },
   ]);
@@ -34,10 +34,11 @@ function AdventureChat({ openingScene, incognito, onRestart }) {
   // Load current adventure state (health, inventory, quests)
   const refreshState = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/adventure/state?incognito=${incognito}`);
+      const tokenParam = sessionToken ? `&session_token=${encodeURIComponent(sessionToken)}` : '';
+      const res = await fetch(`${API_BASE}/api/adventure/state?incognito=${incognito}${tokenParam}`);
       if (res.ok) setState(await res.json());
     } catch { /* non-fatal */ }
-  }, [incognito]);
+  }, [incognito, sessionToken]);
 
   useEffect(() => { refreshState(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -66,7 +67,7 @@ function AdventureChat({ openingScene, incognito, onRestart }) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
-        body: JSON.stringify({ action: text, incognito }),
+        body: JSON.stringify({ action: text, incognito, session_token: sessionToken }),
       });
 
       if (!response.ok) {
@@ -77,6 +78,16 @@ function AdventureChat({ openingScene, incognito, onRestart }) {
       let gotToken = false;
       for await (const data of sseStream(response)) {
         if (controller.signal.aborted) break;
+        if (data.error) {
+          setError(data.error);
+          setMessages(prev => prev.map(m =>
+            m.id === assistantMsgId
+              ? { ...m, content: m.content ? `${m.content}\n\n*[Interrupted: ${data.error}]*` : `*Error: ${data.error}*` }
+              : m
+          ));
+          gotToken = true;
+          break;
+        }
         if (data.token) {
           gotToken = true;
           setMessages(prev => prev.map(m =>
@@ -96,8 +107,10 @@ function AdventureChat({ openingScene, incognito, onRestart }) {
         ));
       }
 
-      // Refresh state after successful action
+      // Refresh state immediately, then schedule syncs after background extraction completes on CPU
       await refreshState();
+      setTimeout(() => refreshState(), 1800);
+      setTimeout(() => refreshState(), 4000);
     } catch (err) {
       if (err.name === 'AbortError') {
         setMessages(prev => prev.filter(m => m.id !== assistantMsgId));
@@ -231,6 +244,8 @@ export default function AdventureLobby() {
   const [startError, setStartError] = useState('');
   const [inGame, setInGame] = useState(false);
   const [openingScene, setOpeningScene] = useState('');
+  // Private session token — kept only in memory, never written to disk or localStorage
+  const [sessionToken, setSessionToken] = useState(null);
 
   // Check for resumable state on mount
   useEffect(() => {
@@ -301,6 +316,8 @@ export default function AdventureLobby() {
         return;
       }
 
+      // Save session token (non-null only for incognito campaigns)
+      setSessionToken(data.session_token || null);
       setOpeningScene(scene);
       setInGame(true);
     } catch (e) {
@@ -314,6 +331,7 @@ export default function AdventureLobby() {
     setInGame(false);
     setOpeningScene('');
     setStartError('');
+    setSessionToken(null); // clear private session token; never persist to storage
     setPrompt('');
     setGenres('');
     setTone('');
@@ -328,6 +346,7 @@ export default function AdventureLobby() {
         <AdventureChat
           openingScene={openingScene}
           incognito={incognito}
+          sessionToken={sessionToken}
           onRestart={handleRestart}
         />
       </div>

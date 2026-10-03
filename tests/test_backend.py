@@ -7,6 +7,8 @@ reminder CRUD & completion toggle, persona compilation, and incognito triage sup
 import asyncio
 import json
 import re
+import shutil
+from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
@@ -14,7 +16,23 @@ from backend import storage, memory_engine, persona_compiler
 from backend.main import app
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(autouse=True)
+def isolated_storage_env(tmp_path: Path):
+    """Isolate storage in tmp_path seeded with copy of data/ so real user data is never polluted."""
+    orig = storage.get_data_dir()
+    test_data = tmp_path / "data"
+    test_data.mkdir(parents=True, exist_ok=True)
+    real_data = Path(__file__).resolve().parent.parent / "data"
+    if real_data.exists():
+        shutil.copytree(real_data, test_data, dirs_exist_ok=True)
+    storage.set_data_dir(test_data)
+    try:
+        yield
+    finally:
+        storage.set_data_dir(orig)
+
+
+@pytest.fixture
 def client():
     """TestClient instance for Project Janus backend."""
     return TestClient(app)

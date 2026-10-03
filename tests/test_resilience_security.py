@@ -82,7 +82,7 @@ def parse_sse_events(raw_sse_text: str) -> list[dict[str, Any]]:
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def isolated_storage(tmp_path: Path):
     """Provides an isolated clean data directory for storage operations."""
     data_dir = tmp_path / "data"

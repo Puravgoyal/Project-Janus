@@ -1,0 +1,39 @@
+/* Project Janus — Standalone Offline CSS Fallback & Dark Theme Specification */
+:root {
+  --bg-obsidian: #0c0d10;
+  --surface-panel: #14171f;
+  --accent-emerald: #10b981;
+  --tint-incognito: #9333ea;
+  --text-main: #f3f4f6;
+  --text-muted: #9ca3af;
+  color: var(--text-main);
+  background-color: var(--bg-obsidian);
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: #0c0d10;
+  color: #f3f4f6;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  min-height: 100vh;
+}
+
+.panel-surface {
+  background-color: #14171f;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.accent-emerald {
+  color: #10b981;
+}
+
+.tint-incognito {
+  color: #9333ea;
+  border-color: #9333ea;
+}
+
+.scroll-container {
+  overflow-y: auto;
+  max-height: 100%;
+}

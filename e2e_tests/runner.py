@@ -186,7 +186,7 @@ def print_summary_table(tier_results: Dict[int, Tuple[JanusTestResult, float]]):
         failed_count = len(res.failures)
         error_count = len(res.errors)
         skip_count = len(res.skipped)
-        passed_count = run_count - failed_count - error_count
+        passed_count = run_count - failed_count - error_count - skip_count
 
         total_tests += run_count
         total_passed += passed_count
@@ -237,7 +237,7 @@ def save_json_report(filepath: str, tier_results: Dict[int, Tuple[JanusTestResul
     }
 
     for tier, (res, duration) in sorted(tier_results.items()):
-        passed = res.testsRun - len(res.failures) - len(res.errors)
+        passed = res.testsRun - len(res.failures) - len(res.errors) - len(res.skipped)
         report["tiers"][f"tier_{tier}"] = {
             "tests_run": res.testsRun,
             "passed": passed,

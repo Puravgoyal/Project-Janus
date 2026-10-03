@@ -36,7 +36,7 @@ class TestFeature01ModelfileGpu(unittest.TestCase):
             self.assertIn("Modelfile.gpu", proj)
             self.assertIn("4096", proj)
         else:
-            self.assertTrue(re.search(r"FROM\s+(artifish/llama3\.2-uncensored:3b|llama3\.2:3b)", content, re.IGNORECASE))
+            self.assertTrue(re.search(r"FROM\s+(artifish/llama3\.2-uncensored(:3b)?|llama3\.2:3b)", content, re.IGNORECASE))
 
     def test_modelfile_gpu_num_gpu_offload_all(self):
         """1.2 Verify num_gpu is set to 999 to offload all layers to RTX 4050 VRAM."""

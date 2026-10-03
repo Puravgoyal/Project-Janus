@@ -11,8 +11,13 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # type: ignore
 
 import httpx
 
@@ -23,6 +28,178 @@ logger = logging.getLogger("janus.memory_engine")
 # Engine connection defaults
 CPU_ENGINE_URL = os.environ.get("JANUS_CPU_URL", "http://127.0.0.1:11435")
 EXTRACTOR_MODEL = os.environ.get("JANUS_EXTRACTOR_MODEL", "janus-extractor")
+USER_TIMEZONE = os.environ.get("JANUS_TIMEZONE", "Asia/Kolkata")
+_REMINDER_LOCK: Optional[asyncio.Lock] = None
+
+
+def get_reminder_lock() -> asyncio.Lock:
+    """Return canonical reminder lock, refreshing if event loop changed."""
+    global _REMINDER_LOCK
+    try:
+        curr_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        curr_loop = None
+
+    if _REMINDER_LOCK is not None and curr_loop is not None:
+        if getattr(_REMINDER_LOCK, "_loop", None) not in (None, curr_loop):
+            _REMINDER_LOCK = None
+
+    if _REMINDER_LOCK is None:
+        _REMINDER_LOCK = asyncio.Lock()
+    return _REMINDER_LOCK
+
+
+
+def resolve_relative_due_date(phrase: str, base_dt: Optional[datetime] = None) -> str:
+    """Resolve relative dates ('today', 'tomorrow') using configured USER_TIMEZONE."""
+    try:
+        tz = ZoneInfo(USER_TIMEZONE)
+    except Exception:
+        tz = timezone.utc
+    if base_dt is None:
+        local_dt = datetime.now(tz)
+    elif base_dt.tzinfo is None:
+        local_dt = base_dt.replace(tzinfo=tz)
+    else:
+        local_dt = base_dt.astimezone(tz)
+
+    clean = phrase.strip().lower()
+    if clean == "today":
+        return local_dt.strftime("%Y-%m-%d")
+    elif clean == "tomorrow":
+        return (local_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+    return local_dt.strftime("%Y-%m-%d")
+
+
+STOPWORDS = {
+    "a", "an", "the", "and", "or", "of", "to", "in", "on", "at", "by", "for", "with",
+    "about", "against", "between", "into", "through", "during", "before", "after",
+    "above", "below", "from", "up", "down", "in", "out", "over", "under", "again",
+    "further", "then", "once", "here", "there", "when", "where", "why", "how", "all",
+    "any", "both", "each", "few", "more", "most", "other", "some", "such", "no", "nor",
+    "not", "only", "own", "same", "so", "than", "too", "very", "s", "t", "can", "will",
+    "just", "don", "should", "now", "my", "our", "your", "his", "her", "their", "its",
+    "i", "me", "we", "us", "you", "he", "she", "it", "they", "them", "task", "reminder"
+}
+
+
+def parse_conversational_reminder_intent(
+    user_text: str,
+    active_reminders: list[dict[str, Any]]
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """
+    Conservatively parses user message to detect unambiguous affirmative completion or cancellation intent.
+    Handles negation, questions, future intentions, quoted statements, and ambiguity.
+    Returns: (matching_reminder_dict, "completed" | "cancelled") or (None, None).
+    """
+    clean_text = (user_text or "").strip()
+    if not clean_text or not active_reminders:
+        return None, None
+
+    # Normalize Unicode quotation marks / apostrophes to ASCII equivalents so
+    # regex patterns using ' work regardless of locale or input method.
+    clean_text = (
+        clean_text
+        .replace("\u2019", "'")   # right single quotation mark  →  apostrophe
+        .replace("\u2018", "'")   # left single quotation mark   →  apostrophe
+        .replace("\u201c", '"')   # left double quotation mark   →  "
+        .replace("\u201d", '"')   # right double quotation mark  →  "
+    )
+
+    lower = clean_text.lower()
+
+    # 1. Question guard: Questions are inquiries, never affirmative completion
+    if "?" in clean_text or re.search(r"^(?:have|has|did|is|was|can|could|will|should|do|does)\s+(?:i|we|you)\b", lower):
+        return None, None
+
+    # 2. Future intent guard: Future plans or promises are not completed tasks
+    if re.search(r"\b(?:will|shall|going\s+to|plan\s+to|planning\s+to|intend\s+to|hope\s+to|tomorrow|later|next\s+week|soon|afterwards)\b", lower):
+        return None, None
+
+    # 3. Hypothetical & conditional guard: "if I finish", "assuming I finish", "suppose I finish", etc.
+    if re.search(r"\b(?:if|suppose|supposing|assuming|in\s+case|once|whenever)\s+(?:i|we|you|he|she|they)\b", lower):
+        return None, None
+
+    # 4. Negation & unfinished guard: Explicit statements that the item is incomplete
+    if re.search(r"\b(?:not|haven't|have\s+not|didn't|did\s+not|hasn't|has\s+not|unfinished|not\s+yet|incomplete|still\s+working|still\s+need|yet\s+to|in\s+progress)\b", lower):
+        return None, None
+
+    # 5. Reported-speech & quotation guard: "Alice said/told/wrote ... I finished ..." or entire quote
+    if re.search(
+        r"\b(?:said|says|told|wrote|texted|noted|mentioned|replied|reported|claimed|admitted|announced|heard|thought)\b"
+        r"[\s,:]+(?:that\b|[\"'])",
+        lower
+    ) or (clean_text.startswith(('"', "'")) and clean_text.endswith(('"', "'"))):
+        return None, None
+
+    # 6. Detect Intent & extract target topic
+    is_completion = False
+    is_cancellation = False
+    target_phrase = ""
+
+    comp_match = re.search(
+        r"\b(?:i(?:'ve|\s+have)?\s+(?:just\s+)?(?:finished|completed|done(?:\s+with)?)|mark(?:\s+as)?\s+(?:done|completed)|completed(?:\s+the)?|finished(?:\s+the)?)\s+(.+?)(?:[.!;]|$)",
+        lower
+    )
+    if comp_match:
+        is_completion = True
+        target_phrase = comp_match.group(1).strip()
+    else:
+        canc_match = re.search(
+            r"\b(?:cancel|remove|delete|dismiss)\s+(?:the\s+)?(?:reminder|task)\s+(?:for\s+|to\s+|called\s+)?(.+?)(?:[.!;]|$)",
+            lower
+        )
+        if canc_match:
+            is_cancellation = True
+            target_phrase = canc_match.group(1).strip()
+
+    if not is_completion and not is_cancellation:
+        return None, None
+
+    # Clean target phrase
+    target_clean = re.sub(r"[^\w\s]", "", target_phrase).strip()
+    if not target_clean:
+        return None, None
+
+    target_words = {w for w in target_clean.split() if w not in STOPWORDS and len(w) > 2}
+    if not target_words:
+        target_words = set(target_clean.split())
+
+    # 5. Candidate matching against active reminders
+    matched_candidates = []
+    for rem in active_reminders:
+        if rem.get("completed", False):
+            continue
+        r_text = str(rem.get("text", "")).strip().lower()
+        r_clean = re.sub(r"[^\w\s]", "", r_text).strip()
+        r_words = {w for w in r_clean.split() if w not in STOPWORDS and len(w) > 2}
+        if not r_words:
+            r_words = set(r_clean.split())
+
+        # Exact substring match
+        if target_clean in r_clean or r_clean in target_clean:
+            matched_candidates.append(rem)
+            continue
+
+        # Word-overlap match: target keywords must be fully covered by reminder or vice versa
+        if target_words and r_words:
+            if target_words.issubset(r_words) or r_words.issubset(target_words):
+                matched_candidates.append(rem)
+            elif len(target_words.intersection(r_words)) >= max(2, len(target_words)):
+                matched_candidates.append(rem)
+
+    # 6. Ambiguity Guard: if several reminders match, DO NOT silently guess!
+    if len(matched_candidates) == 1:
+        action_type = "completed" if is_completion else "cancelled"
+        return matched_candidates[0], action_type
+    elif len(matched_candidates) > 1:
+        logger.info(
+            "Ambiguous reminder match: '%s' matched %d reminders; skipping automated completion.",
+            clean_text, len(matched_candidates)
+        )
+        return None, None
+
+    return None, None
 
 
 def _validate_due_date(val: Any) -> Optional[str]:
@@ -217,27 +394,32 @@ async def extract_and_triage(user_message: str, assistant_reply: str, mode: str 
     if user_msg_clean.lower() in trivial_greetings and len(asst_reply_clean) < 120:
         return {"reminders": [], "work_note": None, "facts": [], "preferences": []}
 
-    # Conversational reminder completion check:
-    # If user says "I finished...", "completed...", "done with...", match active reminders
-    user_lower = user_msg_clean.lower()
-    if any(k in user_lower for k in ["done with", "finished", "completed", "cancel reminder", "remove reminder", "delete reminder"]):
-        try:
-            existing_reminders = await storage.load_reminders()
-            for r in existing_reminders:
-                if not r.get("completed", False):
-                    r_text = str(r.get("text", "")).strip().lower()
-                    if r_text and (r_text in user_lower or any(word in user_lower for word in r_text.split() if len(word) > 4)):
-                        await storage.update_reminder(r["id"], {"completed": True})
-                        logger.info("Conversational reminder completion: marked reminder %s completed", r["id"])
-        except Exception as e:
-            logger.debug("Conversational reminder completion check error: %s", e)
+    # Conversational reminder completion & cancellation check:
+    # Requires affirmative intent, rejects negation, questions, future plans, and handles ambiguity
+    try:
+        existing_reminders = await storage.load_reminders()
+        matched_rem, action_type = parse_conversational_reminder_intent(user_msg_clean, existing_reminders)
+        if matched_rem and action_type == "completed":
+            await storage.update_reminder(matched_rem["id"], {"completed": True})
+            logger.info("Conversational reminder completion: marked reminder %s completed", matched_rem["id"])
+        elif matched_rem and action_type == "cancelled":
+            await storage.delete_reminder(matched_rem["id"])
+            logger.info("Conversational reminder cancellation: deleted reminder %s", matched_rem["id"])
+    except Exception as e:
+        logger.debug("Conversational reminder intent check error: %s", e)
 
     triage_result: Optional[dict[str, Any]] = None
 
-    # Supply explicit current date and UTC timezone for resolving relative dates
-    current_date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Supply explicit current date resolved in user's configured timezone (default Asia/Kolkata)
+    try:
+        tz = ZoneInfo(USER_TIMEZONE)
+        local_now = datetime.now(tz)
+    except Exception:
+        local_now = datetime.now(timezone.utc)
+
+    current_date_str = local_now.strftime("%Y-%m-%d")
     prompt_content = (
-        f"Current Date: {current_date_str} (UTC)\n\n"
+        f"Current Date: {current_date_str} ({USER_TIMEZONE})\n\n"
         f"Conversation Turn to Analyze:\n"
         f"User: {user_msg_clean}\n"
         f"Assistant: {asst_reply_clean}"
@@ -290,46 +472,47 @@ async def extract_and_triage(user_message: str, assistant_reply: str, mode: str 
     # Apply Extracted State to Storage
     # ------------------------------------------------------------------
 
-    # 1. Reminders with deduplication & date/priority validation
+    # 1. Reminders with deduplication & date/priority validation (concurrency safe)
     raw_reminders = triage_result.get("reminders")
     if isinstance(raw_reminders, list):
-        try:
-            existing_all = await storage.load_reminders()
-            existing_active_texts = {
-                str(r.get("text", "")).strip().lower()
-                for r in existing_all
-                if isinstance(r, dict) and not r.get("completed", False)
-            }
-        except Exception:
-            existing_active_texts = set()
+        async with get_reminder_lock():
+            try:
+                existing_all = await storage.load_reminders()
+                existing_active_texts = {
+                    str(r.get("text", "")).strip().lower()
+                    for r in existing_all
+                    if isinstance(r, dict) and not r.get("completed", False)
+                }
+            except Exception:
+                existing_active_texts = set()
 
-        for r_item in raw_reminders:
-            if isinstance(r_item, dict):
-                text = str(r_item.get("text", "")).strip()
-                if text and text.lower() not in existing_active_texts:
-                    is_urgent = any(w in text.lower() or w in user_msg_clean.lower() for w in ["urgent", "asap", "critical", "immediately"])
-                    prio = "high" if is_urgent else str(r_item.get("priority", "medium")).lower()
-                    if prio not in ["low", "medium", "high"]:
-                        prio = "medium"
-                    due_date = _validate_due_date(r_item.get("due_date"))
-                    await storage.add_reminder({
-                        "text": text,
-                        "due_date": due_date,
-                        "priority": prio,
-                        "completed": False
-                    })
-                    existing_active_texts.add(text.lower())
-            elif isinstance(r_item, str) and r_item.strip():
-                text = r_item.strip()
-                if text.lower() not in existing_active_texts:
-                    is_urgent = "urgent" in text.lower()
-                    await storage.add_reminder({
-                        "text": text,
-                        "due_date": None,
-                        "priority": "high" if is_urgent else "medium",
-                        "completed": False
-                    })
-                    existing_active_texts.add(text.lower())
+            for r_item in raw_reminders:
+                if isinstance(r_item, dict):
+                    text = str(r_item.get("text", "")).strip()
+                    if text and text.lower() not in existing_active_texts:
+                        is_urgent = any(w in text.lower() or w in user_msg_clean.lower() for w in ["urgent", "asap", "critical", "immediately"])
+                        prio = "high" if is_urgent else str(r_item.get("priority", "medium")).lower()
+                        if prio not in ["low", "medium", "high"]:
+                            prio = "medium"
+                        due_date = _validate_due_date(r_item.get("due_date"))
+                        await storage.add_reminder({
+                            "text": text,
+                            "due_date": due_date,
+                            "priority": prio,
+                            "completed": False
+                        })
+                        existing_active_texts.add(text.lower())
+                elif isinstance(r_item, str) and r_item.strip():
+                    text = r_item.strip()
+                    if text.lower() not in existing_active_texts:
+                        is_urgent = "urgent" in text.lower()
+                        await storage.add_reminder({
+                            "text": text,
+                            "due_date": None,
+                            "priority": "high" if is_urgent else "medium",
+                            "completed": False
+                        })
+                        existing_active_texts.add(text.lower())
 
     # 2. Work Context
     work_note = triage_result.get("work_note")
