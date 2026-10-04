@@ -116,31 +116,48 @@ def parse_conversational_reminder_intent(
     if re.search(r"\b(?:will|shall|going\s+to|plan\s+to|planning\s+to|intend\s+to|hope\s+to|tomorrow|later|next\s+week|soon|afterwards)\b", lower):
         return None, None
 
-    # 3. Hypothetical & conditional guard: "if I finish", "assuming I finish", "suppose I finish", etc.
-    if re.search(r"\b(?:if|suppose|supposing|assuming|in\s+case|once|whenever)\s+(?:i|we|you|he|she|they)\b", lower):
+    # 3. Hypothetical & conditional guard: "if I finish", "imagine I finished", "pretend", "suppose", etc.
+    if re.search(r"\b(?:if|imagine|pretend|suppose|supposing|assuming|what\s+if|let'?s\s+say|in\s+case|whenever|wish|wishing|hope)\b", lower):
         return None, None
 
-    # 4. Negation & unfinished guard: Explicit statements that the item is incomplete
+    # 4. Partial completion guard: "almost finished", "nearly completed", "barely", etc.
+    if re.search(r"\b(?:almost|nearly|barely|partially|partly|halfway|close\s+to|not\s+quite|started|began)\b", lower):
+        return None, None
+
+    # 5. Negation & unfinished guard: Explicit statements that the item is incomplete
     if re.search(r"\b(?:not|haven't|have\s+not|didn't|did\s+not|hasn't|has\s+not|unfinished|not\s+yet|incomplete|still\s+working|still\s+need|yet\s+to|in\s+progress)\b", lower):
         return None, None
 
-    # 5. Reported-speech & quotation guard: "Alice said/told/wrote ... I finished ..." or entire quote
+    # 6. Reported-speech & quotation guard: "Alice said/told/wrote ...", attribution verbs, or entire quotes
     if re.search(
-        r"\b(?:said|says|told|wrote|texted|noted|mentioned|replied|reported|claimed|admitted|announced|heard|thought)\b"
-        r"[\s,:]+(?:that\b|[\"'])",
+        r"\b(?:said|says|told|tells|wrote|writes|texted|texts|noted|notes|mentioned|mentions|replied|replies|reported|reports|claimed|claims|admitted|admits|announced|announces|heard|thought)\b",
         lower
     ) or (clean_text.startswith(('"', "'")) and clean_text.endswith(('"', "'"))):
         return None, None
 
-    # 6. Detect Intent & extract target topic
+    # 7. Detect Intent & extract target topic
     is_completion = False
     is_cancellation = False
     target_phrase = ""
 
+    # Direct first-person completion: "I finished/completed/am done with..."
     comp_match = re.search(
-        r"\b(?:i(?:'ve|\s+have)?\s+(?:just\s+)?(?:finished|completed|done(?:\s+with)?)|mark(?:\s+as)?\s+(?:done|completed)|completed(?:\s+the)?|finished(?:\s+the)?)\s+(.+?)(?:[.!;]|$)",
+        r"\b(?:i(?:'m|\s+am|'ve|\s+have)?\s+(?:just\s+)?done(?:\s+with)?|i(?:(?:'ve|\s+have)?\s+(?:just\s+)?|\s+)(?:finished|completed))\s+(.+?)(?:[.!;]|$)",
         lower
     )
+    if not comp_match:
+        # Sentence-initial or imperative: "finished...", "mark as done...", "completed..."
+        comp_match = re.search(
+            r"^(?:(?:just\s+)?(?:finished|completed|done\s+with)|mark(?:\s+as)?\s+(?:done|completed)|completed|finished)\s+(.+?)(?:[.!;]|$)",
+            lower
+        )
+    if not comp_match:
+        # "mark [the] [reminder/task] <target> as done/completed"
+        comp_match = re.search(
+            r"\bmark\s+(?:the\s+)?(?:reminder\s+|task\s+)?(.+?)\s+(?:as\s+)?(?:done|completed|finished)(?:[.!;]|$)",
+            lower
+        )
+
     if comp_match:
         is_completion = True
         target_phrase = comp_match.group(1).strip()

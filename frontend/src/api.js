@@ -15,6 +15,7 @@ export async function* sseStream(response) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
+  let terminalDoneReceived = false;
 
   try {
     while (true) {
@@ -35,7 +36,11 @@ export async function* sseStream(response) {
             const dataStr = line.slice(6).trim();
             if (!dataStr) continue;
             try {
-              yield JSON.parse(dataStr);
+              const parsed = JSON.parse(dataStr);
+              if (parsed && parsed.done === true) {
+                terminalDoneReceived = true;
+              }
+              yield parsed;
             } catch {
               // Non-JSON data line — skip
             }
@@ -51,10 +56,24 @@ export async function* sseStream(response) {
           const dataStr = line.slice(6).trim();
           if (!dataStr) continue;
           try {
-            yield JSON.parse(dataStr);
+            const parsed = JSON.parse(dataStr);
+            if (parsed && parsed.done === true) {
+              terminalDoneReceived = true;
+            }
+            yield parsed;
           } catch { /* skip */ }
         }
       }
+    }
+
+    // If stream reached EOF without an explicit terminal completion event,
+    // yield a failure event so consumers never treat premature EOF as success.
+    if (!terminalDoneReceived) {
+      yield {
+        error: 'Stream terminated prematurely before completion',
+        interrupted: true,
+        done: true,
+      };
     }
   } finally {
     reader.releaseLock();

@@ -376,16 +376,16 @@ async def chat_stream(req: ChatStreamRequest):
                         logger.error("GPU engine returned non-200 HTTP %s", stream_resp.status_code)
                         yield f"data: {json.dumps({'error': f'GPU engine returned HTTP {stream_resp.status_code}', 'interrupted': True, 'done': True})}\n\n"
                         return
-        except (httpx.ConnectError, httpx.TimeoutException, OSError) as conn_err:
+        except (httpx.HTTPError, OSError) as conn_err:
             logger.warning("GPU engine at %s unreachable: %s.", GPU_ENGINE_URL, conn_err)
             has_error = True
 
         if not gpu_connected and not accumulated_reply:
-            fallback_text = (
-                f"[Degraded: GPU chat engine offline on {GPU_ENGINE_URL}]. "
+            err_msg = (
+                f"GPU chat engine offline on {GPU_ENGINE_URL}. "
                 f"Ensure Ollama is running and '{CHAT_MODEL}' is loaded."
             )
-            yield f"data: {json.dumps({'token': fallback_text, 'error': 'GPU offline', 'degraded': True, 'done': True})}\n\n"
+            yield f"data: {json.dumps({'error': err_msg, 'degraded': True, 'interrupted': True, 'done': True})}\n\n"
             return
 
         if not completed_normally or has_error:
@@ -723,10 +723,7 @@ async def adventure_action(req: adventure_engine.AdventureAction):
                         return
         except Exception as e:
             logger.warning(f"Adventure GPU offline: {e}")
-            if not accumulated_reply:
-                yield f"data: {json.dumps({'token': '*The Dungeon Master is asleep...*', 'done': True})}\n\n"
-            else:
-                yield f"data: {json.dumps({'error': f'Adventure stream interrupted: {e}', 'interrupted': True, 'done': True})}\n\n"
+            yield f"data: {json.dumps({'error': f'The Game Master is unavailable: {e}', 'interrupted': True, 'done': True})}\n\n"
             return
 
         if not completed_normally:
@@ -797,13 +794,6 @@ async def update_persona(name: str, request: Request, incognito: Optional[bool] 
 
     char_name = str(data.get("name") or (existing_persona.get("name") if existing_persona else name)).strip()
     char_desc = str(data.get("description") or "").strip()
-    raw_traits = data.get("traits") or data.get("personality_traits") or []
-    if isinstance(raw_traits, str):
-        traits = [t.strip() for t in raw_traits.split(",") if t.strip()]
-    elif isinstance(raw_traits, (list, tuple)):
-        traits = [str(t).strip() for t in raw_traits if str(t).strip()]
-    else:
-        traits = []
 
     roleplay_style = memory_engine._extract_roleplay_style(data)
     forge_schema = data.get("forge_schema") if isinstance(data.get("forge_schema"), dict) else {}
@@ -812,13 +802,59 @@ async def update_persona(name: str, request: Request, incognito: Optional[bool] 
     physicality = forge_schema.get("physicality") or data.get("physicality") or {}
     mature = forge_schema.get("mature_themes") or data.get("mature_themes") or {}
 
+    # Consistent authoritative trait extraction:
+    # If forge_schema (or personality dict) specifies core_traits, it takes precedence.
+    # Otherwise, fall back to top-level traits / personality_traits.
+    traits = []
+    forge_core_traits = None
+    if isinstance(personality, dict) and "core_traits" in personality:
+        raw_ct = personality["core_traits"]
+        if isinstance(raw_ct, str):
+            forge_core_traits = [t.strip() for t in raw_ct.split(",") if t.strip()]
+        elif isinstance(raw_ct, (list, tuple)):
+            forge_core_traits = [str(t).strip() for t in raw_ct if str(t).strip()]
+
+    if forge_core_traits:
+        traits = forge_core_traits
+    else:
+        raw_traits = data.get("traits") or data.get("personality_traits") or []
+        if isinstance(raw_traits, str):
+            traits = [t.strip() for t in raw_traits.split(",") if t.strip()]
+        elif isinstance(raw_traits, (list, tuple)):
+            traits = [str(t).strip() for t in raw_traits if str(t).strip()]
+        elif forge_core_traits is not None:
+            traits = forge_core_traits
+
+    # Synchronize trait representations across the card
+    data["traits"] = traits
+    data["personality_traits"] = traits
+    data["personality"] = traits
+    if isinstance(personality, dict):
+        personality["core_traits"] = traits
+    if "forge_schema" in data and isinstance(data["forge_schema"], dict):
+        if "personality" in data["forge_schema"] and isinstance(data["forge_schema"]["personality"], dict):
+            data["forge_schema"]["personality"]["core_traits"] = traits
+
+    # Roleplay style consistency
+    if "roleplay_style" in data:
+        data["roleplay_style"] = roleplay_style
+    if "forge_schema" in data and isinstance(data["forge_schema"], dict):
+        data["forge_schema"]["roleplay_style"] = roleplay_style
+
     needs_prompt_regen = False
     if not data.get("system_prompt"):
         needs_prompt_regen = True
     elif existing_persona:
         old_name = str(existing_persona.get("name") or "").strip()
         old_desc = str(existing_persona.get("description") or "").strip()
-        old_traits = existing_persona.get("traits") or existing_persona.get("personality_traits") or []
+        old_forge = existing_persona.get("forge_schema") if isinstance(existing_persona.get("forge_schema"), dict) else {}
+        old_personality = old_forge.get("personality") or existing_persona.get("personality") or {}
+        old_traits = (
+            old_personality.get("core_traits")
+            or existing_persona.get("traits")
+            or existing_persona.get("personality_traits")
+            or []
+        )
         if isinstance(old_traits, str):
             old_traits = [t.strip() for t in old_traits.split(",") if t.strip()]
         elif isinstance(old_traits, (list, tuple)):
@@ -827,8 +863,6 @@ async def update_persona(name: str, request: Request, incognito: Optional[bool] 
             old_traits = []
 
         old_roleplay = memory_engine._extract_roleplay_style(existing_persona)
-        old_forge = existing_persona.get("forge_schema") if isinstance(existing_persona.get("forge_schema"), dict) else {}
-        old_personality = old_forge.get("personality") or existing_persona.get("personality") or {}
         old_emotion = old_forge.get("emotion") or existing_persona.get("emotion") or {}
         old_physicality = old_forge.get("physicality") or existing_persona.get("physicality") or {}
         old_mature = old_forge.get("mature_themes") or existing_persona.get("mature_themes") or {}
@@ -850,53 +884,16 @@ async def update_persona(name: str, request: Request, incognito: Optional[bool] 
         needs_prompt_regen = True
 
     if needs_prompt_regen:
-        raw_arch = personality.get("archetype") if isinstance(personality, dict) else None
-        archetype = str(raw_arch or char_desc or "Character").strip() or "Character"
-        flaws = personality.get("flaws") if isinstance(personality, dict) else []
-        flaws_str = f" Character flaws: {', '.join(str(f) for f in flaws)}." if isinstance(flaws, list) and flaws else ""
-
-        speech = emotion.get("speech_style", "") if isinstance(emotion, dict) else ""
-        mood = emotion.get("default_mood", "") if isinstance(emotion, dict) else ""
-        stress = emotion.get("reaction_to_stress", "") if isinstance(emotion, dict) else ""
-        appearance = physicality.get("appearance", "") if isinstance(physicality, dict) else ""
-        body_lang = physicality.get("body_language", "") if isinstance(physicality, dict) else ""
-        boundaries = mature.get("boundaries", "") if isinstance(mature, dict) else ""
-        mature_dyn = mature.get("mature_dynamics", "") if isinstance(mature, dict) else ""
-
-        prompt_parts = [
-            f"You are {char_name}.",
-            f"Your archetype is {archetype}.",
-        ]
-        if char_desc and char_desc.lower() != archetype.lower():
-            prompt_parts.append(f"About you: {char_desc}.")
-        if traits:
-            prompt_parts.append(f"Core traits: {', '.join(traits)}.")
-        if flaws_str:
-            prompt_parts.append(flaws_str.strip())
-        if speech:
-            prompt_parts.append(f"Your speech style: {speech}.")
-        if mood:
-            prompt_parts.append(f"Your default mood: {mood}.")
-        if stress:
-            prompt_parts.append(f"Under stress you: {stress}.")
-        if appearance:
-            prompt_parts.append(f"Physically: {appearance}.")
-        if body_lang:
-            prompt_parts.append(f"Habitual body language: {body_lang}.")
-        if boundaries:
-            prompt_parts.append(f"Boundaries: {boundaries}.")
-        if mature_dyn:
-            prompt_parts.append(f"Mature dynamics: {mature_dyn}.")
-        if roleplay_style:
-            prompt_parts.append(f"Roleplay Style & Directives: {roleplay_style}")
-
-        prompt_parts.append(
-            "Strong Roleplay Enforcement: Fully embody this character and roleplay style in every response. "
-            "Actively engage in conversation, drive the interaction forward, and ask questions or take initiative without avoiding interaction. "
-            "Never give generic, dismissive, or avoidant AI responses. "
-            "Never break character or refer to yourself as an AI or assistant."
+        data["system_prompt"] = persona_compiler.compile_persona_system_prompt(
+            name=char_name,
+            personality=personality,
+            emotion=emotion,
+            physicality=physicality,
+            mature=mature,
+            roleplay_style=roleplay_style,
+            char_desc=char_desc,
+            traits=traits,
         )
-        data["system_prompt"] = " ".join(prompt_parts)
 
     if "_slider_values" in data:
         if "forge_schema" in data and isinstance(data["forge_schema"], dict):

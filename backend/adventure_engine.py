@@ -114,6 +114,7 @@ def get_state_path() -> Path:
     return storage.get_data_dir() / "adventure_state.json"
 
 async def get_state(incognito: bool, session_token: Optional[str] = None) -> AdventureState:
+    global _ACTIVE_CAMPAIGN_ID
     if incognito:
         clean_token = (session_token or "").strip()
         if not clean_token or clean_token not in _INCOGNITO_SESSIONS:
@@ -123,7 +124,10 @@ async def get_state(incognito: bool, session_token: Optional[str] = None) -> Adv
     state_path = get_state_path()
     try:
         data = await storage.safe_read_json(state_path)
-        return AdventureState(**data)
+        st = AdventureState(**data)
+        if st.campaign_id and not _ACTIVE_CAMPAIGN_ID:
+            _ACTIVE_CAMPAIGN_ID = st.campaign_id
+        return st
     except FileNotFoundError:
         return AdventureState()
     except Exception as e:
@@ -158,6 +162,7 @@ async def save_state_guarded(
     still match expected_campaign_id / expected_version under get_replacement_lock() before writing.
     Returns True if successfully written, False if rejected due to campaign replacement.
     """
+    global _ACTIVE_CAMPAIGN_ID
     if incognito:
         clean_token = (session_token or "").strip()
         if not clean_token:
@@ -170,6 +175,18 @@ async def save_state_guarded(
         return True
 
     async with get_replacement_lock():
+        # Restore active campaign identity from persisted disk state if server restarted
+        state_path = get_state_path()
+        current_data = None
+        try:
+            current_data = await storage.safe_read_json(state_path)
+            current = AdventureState(**current_data)
+        except (FileNotFoundError, Exception):
+            current = AdventureState()
+
+        if not _ACTIVE_CAMPAIGN_ID and current.campaign_id:
+            _ACTIVE_CAMPAIGN_ID = current.campaign_id
+
         if expected_campaign_id is not None:
             if expected_campaign_id != _ACTIVE_CAMPAIGN_ID:
                 logger.warning(
@@ -177,7 +194,6 @@ async def save_state_guarded(
                     _ACTIVE_CAMPAIGN_ID, expected_campaign_id
                 )
                 return False
-            current = await get_state(incognito=False)
             if current.campaign_id != expected_campaign_id:
                 logger.warning(
                     "Guarded write rejected: disk campaign is %s, expected %s",
@@ -192,7 +208,6 @@ async def save_state_guarded(
                 return False
 
         state.version += 1
-        state_path = get_state_path()
         await storage.safe_write_json(state_path, state.dict())
         return True
 

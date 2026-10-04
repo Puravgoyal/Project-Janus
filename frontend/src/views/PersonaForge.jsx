@@ -139,7 +139,12 @@ function PersonaChat({ persona, onClose }) {
           setError(data.error);
           setHistory(prev => prev.map(m =>
             m.id === assistantMsgId
-              ? { ...m, content: `*Error: ${data.error}*` }
+              ? {
+                  ...m,
+                  content: m.content
+                    ? `${m.content}\n\n*[Interrupted: ${data.error}]*`
+                    : `*Error: ${data.error}*`,
+                }
               : m
           ));
           gotToken = true;
@@ -261,6 +266,7 @@ export default function PersonaForge() {
   const [roleplayStyle, setRoleplayStyle] = useState('');
   const [suggestingTags, setSuggestingTags] = useState(false);
   const [sliders, setSliders] = useState(emptySliders());
+  const [slidersTouched, setSlidersTouched] = useState(false);
 
   // Wiki Ingest State
   const [wikiName, setWikiName] = useState('');
@@ -321,12 +327,15 @@ export default function PersonaForge() {
         const data = await res.json();
         const char = data.character || {};
         setEnhancedCharData(char);
+        setSlidersTouched(false);
         if (char.name) setName(char.name);
         if (char.personality?.archetype) setDescription(char.personality.archetype);
         if (char.personality?.core_traits) {
           setTags(char.personality.core_traits.join(', '));
         }
-        if (char.roleplay_style) setRoleplayStyle(char.roleplay_style);
+        if (char.roleplay_style !== undefined && char.roleplay_style !== null) {
+          setRoleplayStyle(char.roleplay_style);
+        }
       } else {
         const err = await res.json().catch(() => ({}));
         setFormError(err.detail || 'Enhancement failed.');
@@ -372,53 +381,88 @@ export default function PersonaForge() {
   };
 
   const buildCharacterData = (targetName, targetDesc, targetTags, targetSliders, targetRoleplay) => {
-    const personalityTraits = [
+    const sliderDerivedTraits = [
       mapSliderValue('order_chaos', targetSliders.order_chaos),
       mapSliderValue('optimism_cynicism', targetSliders.optimism_cynicism),
       mapSliderValue('intro_extro', targetSliders.intro_extro),
     ];
 
-    const baseFields = editingPersona ? { ...editingPersona } : {};
+    // Destructure editingPersona to avoid recursively nesting previous forge_schema
+    const { forge_schema: _prevForge, ...cleanBaseFields } = editingPersona || {};
     const enhanced = enhancedCharData || {};
 
+    const parsedTags = targetTags
+      ? targetTags.split(',').map(t => t.trim()).filter(Boolean)
+      : [];
+
+    // Core traits resolution:
+    // If the user explicitly moved sliders (slidersTouched === true), use slider traits.
+    // Otherwise, preserve enhanced traits, user-entered tags, or previous saved traits.
+    let resolvedCoreTraits;
+    if (slidersTouched) {
+      resolvedCoreTraits = sliderDerivedTraits;
+    } else if (Array.isArray(enhanced.personality?.core_traits) && enhanced.personality.core_traits.length > 0) {
+      resolvedCoreTraits = enhanced.personality.core_traits;
+    } else if (parsedTags.length > 0) {
+      resolvedCoreTraits = parsedTags;
+    } else if (Array.isArray(_prevForge?.personality?.core_traits) && _prevForge.personality.core_traits.length > 0) {
+      resolvedCoreTraits = _prevForge.personality.core_traits;
+    } else if (Array.isArray(cleanBaseFields.traits) && cleanBaseFields.traits.length > 0) {
+      resolvedCoreTraits = cleanBaseFields.traits;
+    } else {
+      resolvedCoreTraits = sliderDerivedTraits;
+    }
+
     const personalityObj = {
-      archetype: targetDesc || enhanced.personality?.archetype || baseFields.forge_schema?.personality?.archetype || targetName.trim(),
-      core_traits: personalityTraits,
-      flaws: enhanced.personality?.flaws || baseFields.forge_schema?.personality?.flaws || ['Reserved'],
+      archetype: targetDesc || enhanced.personality?.archetype || _prevForge?.personality?.archetype || cleanBaseFields.personality?.archetype || targetName.trim(),
+      core_traits: resolvedCoreTraits,
+      flaws: enhanced.personality?.flaws || _prevForge?.personality?.flaws || cleanBaseFields.personality?.flaws || ['Reserved'],
     };
 
-    const emotionObj = enhanced.emotion || baseFields.forge_schema?.emotion || {
+    const emotionObj = enhanced.emotion || _prevForge?.emotion || cleanBaseFields.emotion || {
       default_mood: 'Composed',
       reaction_to_stress: 'Focused',
       speech_style: 'Clear and deliberate',
     };
 
-    const physicalityObj = enhanced.physicality || baseFields.forge_schema?.physicality || {
+    const physicalityObj = enhanced.physicality || _prevForge?.physicality || cleanBaseFields.physicality || {
       appearance: 'Distinctive demeanor',
       body_language: 'Balanced and purposeful',
     };
 
-    const matureObj = enhanced.mature_themes || baseFields.forge_schema?.mature_themes || {
+    const matureObj = enhanced.mature_themes || _prevForge?.mature_themes || cleanBaseFields.mature_themes || {
       nsfw_enabled: false,
       boundaries: '',
       mature_dynamics: '',
     };
 
+    // Roleplay style: distinguish intentionally cleared string from undefined/null
+    const cleanRoleplay = (targetRoleplay !== undefined && targetRoleplay !== null)
+      ? targetRoleplay
+      : (enhanced.roleplay_style ?? cleanBaseFields.roleplay_style ?? '');
+
     const characterObj = {
-      ...baseFields,
+      ...cleanBaseFields,
       name: targetName.trim(),
       description: targetDesc,
-      traits: targetTags ? targetTags.split(',').map(t => t.trim()).filter(Boolean) : [],
+      traits: resolvedCoreTraits,
+      personality_traits: resolvedCoreTraits,
       personality: personalityObj,
       emotion: emotionObj,
       physicality: physicalityObj,
       mature_themes: matureObj,
-      roleplay_style: targetRoleplay || enhanced.roleplay_style || baseFields.roleplay_style || '',
+      roleplay_style: cleanRoleplay,
       _slider_values: targetSliders,
     };
 
+    // Bounded schema: never recursively nest characterObj or previous forge_schema
     characterObj.forge_schema = {
-      ...characterObj,
+      name: characterObj.name,
+      personality: personalityObj,
+      emotion: emotionObj,
+      physicality: physicalityObj,
+      mature_themes: matureObj,
+      roleplay_style: cleanRoleplay,
       _slider_values: targetSliders,
     };
 
@@ -527,6 +571,7 @@ export default function PersonaForge() {
   const openForge = (persona = null) => {
     setFormError('');
     setEnhancedCharData(null);
+    setSlidersTouched(false);
     if (persona) {
       setEditingPersona(persona);
       setName(persona.name || '');
@@ -686,17 +731,17 @@ export default function PersonaForge() {
             <Slider
               label="Order/Chaos" leftLabel="Order" rightLabel="Chaos"
               value={sliders.order_chaos}
-              onChange={v => setSliders(s => ({ ...s, order_chaos: v }))}
+              onChange={v => { setSlidersTouched(true); setSliders(s => ({ ...s, order_chaos: v })); }}
             />
             <Slider
               label="Optimism/Cynicism" leftLabel="Optimism" rightLabel="Cynicism"
               value={sliders.optimism_cynicism}
-              onChange={v => setSliders(s => ({ ...s, optimism_cynicism: v }))}
+              onChange={v => { setSlidersTouched(true); setSliders(s => ({ ...s, optimism_cynicism: v })); }}
             />
             <Slider
               label="Introvert/Extrovert" leftLabel="Introvert" rightLabel="Extrovert"
               value={sliders.intro_extro}
-              onChange={v => setSliders(s => ({ ...s, intro_extro: v }))}
+              onChange={v => { setSlidersTouched(true); setSliders(s => ({ ...s, intro_extro: v })); }}
             />
           </div>
 

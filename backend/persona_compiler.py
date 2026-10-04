@@ -708,6 +708,93 @@ async def enhance_character_prompt(base_prompt: str, allow_nsfw: bool = False) -
     return result
 
 
+def compile_persona_system_prompt(
+    name: str,
+    personality: Optional[dict[str, Any]] = None,
+    emotion: Optional[dict[str, Any]] = None,
+    physicality: Optional[dict[str, Any]] = None,
+    mature: Optional[dict[str, Any]] = None,
+    roleplay_style: str = "",
+    char_desc: str = "",
+    traits: Optional[list[str]] = None,
+) -> str:
+    """
+    Canonical system prompt compiler for Project Janus personas.
+    Provides consistent compilation across both persona creation (forge) and editing.
+    """
+    p = personality if isinstance(personality, dict) else {}
+    e = emotion if isinstance(emotion, dict) else {}
+    ph = physicality if isinstance(physicality, dict) else {}
+    m = mature if isinstance(mature, dict) else {}
+
+    clean_name = str(name or "Character").strip() or "Character"
+    raw_arch = p.get("archetype")
+    archetype = str(raw_arch or char_desc or "Character").strip() or "Character"
+
+    # Core traits: explicit traits parameter has highest priority, then personality.core_traits
+    final_traits: list[str] = []
+    if traits is not None:
+        final_traits = [str(t).strip() for t in traits if str(t).strip()]
+    elif "core_traits" in p:
+        raw_t = p["core_traits"]
+        if isinstance(raw_t, str):
+            final_traits = [t.strip() for t in raw_t.split(",") if t.strip()]
+        elif isinstance(raw_t, (list, tuple)):
+            final_traits = [str(t).strip() for t in raw_t if str(t).strip()]
+
+    raw_flaws = p.get("flaws", [])
+    if isinstance(raw_flaws, str):
+        flaws = [f.strip() for f in raw_flaws.split(",") if f.strip()]
+    elif isinstance(raw_flaws, (list, tuple)):
+        flaws = [str(f).strip() for f in raw_flaws if str(f).strip()]
+    else:
+        flaws = []
+
+    speech = str(e.get("speech_style") or "").strip()
+    mood = str(e.get("default_mood") or "").strip()
+    stress = str(e.get("reaction_to_stress") or "").strip()
+    appearance = str(ph.get("appearance") or "").strip()
+    body_lang = str(ph.get("body_language") or "").strip()
+    boundaries = str(m.get("boundaries") or "").strip()
+    mature_dyn = str(m.get("mature_dynamics") or "").strip()
+    clean_roleplay = str(roleplay_style or "").strip()
+
+    prompt_parts = [
+        f"You are {clean_name}.",
+        f"Your archetype is {archetype}.",
+    ]
+    if char_desc and char_desc.strip().lower() != archetype.lower():
+        prompt_parts.append(f"About you: {char_desc.strip()}.")
+    if final_traits:
+        prompt_parts.append(f"Core traits: {', '.join(final_traits)}.")
+    if flaws:
+        prompt_parts.append(f"Character flaws: {', '.join(flaws)}.")
+    if speech:
+        prompt_parts.append(f"Your speech style: {speech}.")
+    if mood:
+        prompt_parts.append(f"Your default mood: {mood}.")
+    if stress:
+        prompt_parts.append(f"Under stress you: {stress}.")
+    if appearance:
+        prompt_parts.append(f"Physically: {appearance}.")
+    if body_lang:
+        prompt_parts.append(f"Habitual body language: {body_lang}.")
+    if boundaries:
+        prompt_parts.append(f"Boundaries: {boundaries}.")
+    if m.get("nsfw_enabled") and mature_dyn:
+        prompt_parts.append(f"Mature dynamics: {mature_dyn}.")
+    if clean_roleplay:
+        prompt_parts.append(f"Roleplay Style & Directives: {clean_roleplay}")
+
+    prompt_parts.append(
+        "Strong Roleplay Enforcement: Fully embody this character and roleplay style in every response. "
+        "Actively engage in conversation, drive the interaction forward, and ask questions or take initiative without avoiding interaction. "
+        "Never give generic, dismissive, or avoidant AI responses. "
+        "Never break character or refer to yourself as an AI or assistant."
+    )
+    return " ".join(prompt_parts)
+
+
 async def forge_character(character_data: dict[str, Any], incognito: bool = False) -> dict[str, Any]:
     """
     Validates and optionally persists a CharacterForgeSchema dict.
@@ -751,33 +838,15 @@ async def forge_character(character_data: dict[str, Any], incognito: bool = Fals
     if not flaws:
         flaws = ["Reserved"]
 
-    system_prompt_parts = [
-        f"You are {name}.",
-        f"Your archetype is {personality.get('archetype', 'Undefined')}.",
-        f"Core traits: {', '.join(traits)}.",
-        f"Character flaws: {', '.join(flaws)}.",
-        f"Your speech style: {emotion.get('speech_style', '')}.",
-        f"Your default mood: {emotion.get('default_mood', '')}.",
-        f"Under stress you: {emotion.get('reaction_to_stress', '')}.",
-        f"Physically: {physicality.get('appearance', '')}.",
-        f"Habitual body language: {physicality.get('body_language', '')}.",
-    ]
-    if mature.get("boundaries"):
-        system_prompt_parts.append(f"Boundaries: {mature.get('boundaries')}.")
-    if mature.get("nsfw_enabled") and mature.get("mature_dynamics"):
-        system_prompt_parts.append(f"Mature dynamics: {mature.get('mature_dynamics')}.")
-
-
-    if roleplay_style:
-        system_prompt_parts.append(f"Roleplay Style & Directives: {roleplay_style}")
-
-    system_prompt_parts.append(
-        "Strong Roleplay Enforcement: Fully embody this character and roleplay style in every response. "
-        "Actively engage in conversation, drive the interaction forward, and ask questions or take initiative without avoiding interaction. "
-        "Never give generic, dismissive, or avoidant AI responses. "
-        "Never break character or refer to yourself as an AI or assistant."
+    system_prompt = compile_persona_system_prompt(
+        name=name,
+        personality=personality,
+        emotion=emotion,
+        physicality=physicality,
+        mature=mature,
+        roleplay_style=roleplay_style,
+        traits=traits,
     )
-    system_prompt = " ".join(system_prompt_parts)
 
     if incognito:
         logger.info("Forge: incognito=True — returning character '%s' without disk write.", name)
