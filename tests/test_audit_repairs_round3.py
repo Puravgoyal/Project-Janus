@@ -530,3 +530,154 @@ def test_persona_schema_nesting_prevention_across_three_edits(client):
     assert r3.status_code == 200
     saved3 = r3.json()["persona"]
     assert "forge_schema" not in saved3["forge_schema"], "Cycle 3 embedded forge_schema inside forge_schema"
+
+
+# ============================================================================
+# 6. Legacy Persona Editing, Trait Clearing, & Input Validation
+# ============================================================================
+
+def test_legacy_persona_editing_list_personality(client):
+    """Verify legacy cards with personality as a list can be edited, saved, and reopened without 500 error."""
+    # Ensure ada_lovelace is loaded with list personality
+    ada = client.get("/api/personas/ada_lovelace").json()
+    assert isinstance(ada.get("personality"), list)
+
+    # Update description and name
+    update_payload = {
+        **ada,
+        "description": "Pioneering programmer and mathematician of the Analytical Engine.",
+        "name": "Lady Ada Lovelace"
+    }
+    resp = client.put("/api/personas/ada_lovelace", json=update_payload)
+    assert resp.status_code == 200
+    saved = resp.json()["persona"]
+    assert saved["name"] == "Lady Ada Lovelace"
+    assert "Pioneering programmer" in saved["description"]
+    assert isinstance(saved["traits"], list)
+    assert len(saved["traits"]) > 0
+
+    # Reopen
+    reopened = client.get("/api/personas/ada_lovelace").json()
+    assert reopened["name"] == "Lady Ada Lovelace"
+    assert reopened["traits"] == saved["traits"]
+
+
+def test_legacy_persona_editing_personality_shapes_and_validation(client):
+    """Test persona shapes with personality as dict, missing, null, and invalid types."""
+    base_card = {
+        "name": "Hypatia Polymath",
+        "description": "Scholar of Alexandria",
+        "traits": ["Scholarly"]
+    }
+    # 1. Personality as list
+    r1 = client.put("/api/personas/hypatia_poly", json={**base_card, "personality": ["Scholarly", "Mathematical"]})
+    assert r1.status_code == 200
+    p1 = r1.json()["persona"]
+    assert p1["traits"] == ["Scholarly", "Mathematical"]
+
+    # 2. Personality as dict
+    r2 = client.put("/api/personas/hypatia_poly", json={
+        **p1,
+        "personality": {"archetype": "Scholar", "core_traits": ["Rigorous", "Astronomer"], "flaws": ["Stern"]}
+    })
+    assert r2.status_code == 200
+    p2 = r2.json()["persona"]
+    assert p2["traits"] == ["Rigorous", "Astronomer"]
+
+    # 3. Personality as null
+    r3 = client.put("/api/personas/hypatia_poly", json={**p2, "personality": None, "traits": ["Inquisitive"]})
+    assert r3.status_code == 200
+    p3 = r3.json()["persona"]
+    assert p3["traits"] == ["Inquisitive"]
+
+    # 4. Personality missing from request
+    r4 = client.put("/api/personas/hypatia_poly", json={"name": "Hypatia Polymath Updated", "description": "New description"})
+    assert r4.status_code == 200
+    p4 = r4.json()["persona"]
+    assert p4["traits"] == ["Inquisitive"]  # Preserved from existing
+
+    # 5. Invalid personality type -> 400 validation error
+    r5 = client.put("/api/personas/hypatia_poly", json={**p4, "personality": 12345})
+    assert r5.status_code == 400
+    assert "Invalid personality format" in r5.json()["detail"]
+
+
+def test_explicit_trait_clearing_omits_core_traits_in_prompt(client):
+    """When traits or core_traits is explicitly cleared to [], traits are cleared and Core traits: is omitted."""
+    card = {
+        "name": "Blank Persona",
+        "description": "A character without traits",
+        "traits": ["InitialTrait"],
+        "forge_schema": {
+            "name": "Blank Persona",
+            "personality": {"archetype": "Blank", "core_traits": ["InitialTrait"], "flaws": []}
+        }
+    }
+    r1 = client.put("/api/personas/blank_p", json=card)
+    assert r1.status_code == 200
+    p1 = r1.json()["persona"]
+    assert "Core traits: InitialTrait." in p1["system_prompt"]
+
+    # Explicitly clear traits to []
+    r2 = client.put("/api/personas/blank_p", json={
+        **p1,
+        "traits": [],
+        "forge_schema": {
+            **p1["forge_schema"],
+            "personality": {
+                **p1["forge_schema"]["personality"],
+                "core_traits": []
+            }
+        }
+    })
+    assert r2.status_code == 200
+    p2 = r2.json()["persona"]
+    assert p2["traits"] == []
+    assert p2["personality_traits"] == []
+    assert "Core traits:" not in p2["system_prompt"]
+
+
+# ============================================================================
+# 7. Conversational Reminder Intent Edge Cases
+# ============================================================================
+
+@pytest.mark.asyncio
+async def test_reminder_intent_doubt_quotes_and_reviewing_notes():
+    """Verify doubt, quoted examples, and 'reviewing my notes' inflection handling."""
+    active_reminders = [
+        {"id": "rem_arch", "text": "Submit architecture report", "completed": False},
+        {"id": "rem_notes", "text": "Review notes", "completed": False},
+    ]
+
+    # 1. Uncertainty / doubt -> Must NOT complete
+    rem, action = memory_engine.parse_conversational_reminder_intent(
+        "I doubt I finished the architecture report.",
+        active_reminders
+    )
+    assert rem is None
+    assert action is None
+
+    # 2. Quoted example -> Must NOT complete
+    rem, action = memory_engine.parse_conversational_reminder_intent(
+        'The example is "I finished the architecture report."',
+        active_reminders
+    )
+    assert rem is None
+    assert action is None
+
+    # 3. Reported speech -> Must NOT complete
+    rem, action = memory_engine.parse_conversational_reminder_intent(
+        "Alice said she finished the architecture report.",
+        active_reminders
+    )
+    assert rem is None
+    assert action is None
+
+    # 4. Valid completion with inflection: 'reviewing my notes' -> Must complete 'Review notes'
+    rem, action = memory_engine.parse_conversational_reminder_intent(
+        "I finished reviewing my notes.",
+        active_reminders
+    )
+    assert rem is not None
+    assert rem["id"] == "rem_notes"
+    assert action == "completed"

@@ -112,30 +112,43 @@ def parse_conversational_reminder_intent(
     if "?" in clean_text or re.search(r"^(?:have|has|did|is|was|can|could|will|should|do|does)\s+(?:i|we|you)\b", lower):
         return None, None
 
-    # 2. Future intent guard: Future plans or promises are not completed tasks
+    # 2. Quotation / Embedded quotation guard: if completion verb is inside quotes or the entire message is quoted
+    if re.search(r'["\'](?:[^"\']*\b(?:finished|completed|done)\b[^"\']*)["\']', clean_text) or (clean_text.startswith(('"', "'")) and clean_text.endswith(('"', "'"))):
+        return None, None
+
+    # 3. Example / Demonstration guard: sentences describing examples or samples
+    if re.search(r"\b(?:for\s+example|example\s+is|e\.g\.|sample|instance|quote|citation)\b", lower):
+        return None, None
+
+    # 4. Uncertainty & Doubt guard: "I doubt I finished...", "unsure if I finished...", etc.
+    if re.search(r"\b(?:doubt|doubts|doubting|doubtful|unsure|not\s+sure|don'?t\s+think|wonder|wondering|uncertain|hesitate|hesitant)\b", lower):
+        return None, None
+
+    # 5. Future intent guard: Future plans or promises are not completed tasks
     if re.search(r"\b(?:will|shall|going\s+to|plan\s+to|planning\s+to|intend\s+to|hope\s+to|tomorrow|later|next\s+week|soon|afterwards)\b", lower):
         return None, None
 
-    # 3. Hypothetical & conditional guard: "if I finish", "imagine I finished", "pretend", "suppose", etc.
+    # 6. Hypothetical & conditional guard: "if I finish", "imagine I finished", "pretend", "suppose", etc.
     if re.search(r"\b(?:if|imagine|pretend|suppose|supposing|assuming|what\s+if|let'?s\s+say|in\s+case|whenever|wish|wishing|hope)\b", lower):
         return None, None
 
-    # 4. Partial completion guard: "almost finished", "nearly completed", "barely", etc.
+    # 7. Partial completion guard: "almost finished", "nearly completed", "barely", etc.
     if re.search(r"\b(?:almost|nearly|barely|partially|partly|halfway|close\s+to|not\s+quite|started|began)\b", lower):
         return None, None
 
-    # 5. Negation & unfinished guard: Explicit statements that the item is incomplete
+    # 8. Negation & unfinished guard: Explicit statements that the item is incomplete
     if re.search(r"\b(?:not|haven't|have\s+not|didn't|did\s+not|hasn't|has\s+not|unfinished|not\s+yet|incomplete|still\s+working|still\s+need|yet\s+to|in\s+progress)\b", lower):
         return None, None
 
-    # 6. Reported-speech & quotation guard: "Alice said/told/wrote ...", attribution verbs, or entire quotes
+    # 9. Reported-speech & attribution guard: "Alice said/told/wrote ...", attribution verbs
     if re.search(
-        r"\b(?:said|says|told|tells|wrote|writes|texted|texts|noted|notes|mentioned|mentions|replied|replies|reported|reports|claimed|claims|admitted|admits|announced|announces|heard|thought)\b",
+        r"\b(?:said|says|told|tells|wrote|writes|texted|texts|mentioned|mentions|replied|replies|reported|reports|claimed|claims|admitted|admits|announced|announces|heard)\b|"
+        r"\b(?:noted|notes|thought)\s+(?:that\b|[\"'])",
         lower
-    ) or (clean_text.startswith(('"', "'")) and clean_text.endswith(('"', "'"))):
+    ):
         return None, None
 
-    # 7. Detect Intent & extract target topic
+    # 10. Detect Intent & extract target topic
     is_completion = False
     is_cancellation = False
     target_phrase = ""
@@ -182,7 +195,23 @@ def parse_conversational_reminder_intent(
     if not target_words:
         target_words = set(target_clean.split())
 
-    # 5. Candidate matching against active reminders
+    # Suffix stemming helper for inflection tolerance (e.g. reviewing -> review)
+    def _words_match(w1: str, w2: str) -> bool:
+        if w1 == w2:
+            return True
+        def stem(w: str) -> str:
+            for suffix in ("ing", "ed", "es", "s"):
+                if w.endswith(suffix) and len(w) - len(suffix) >= 3:
+                    return w[:-len(suffix)]
+            return w
+        s1, s2 = stem(w1), stem(w2)
+        if s1 == s2:
+            return True
+        if len(s1) >= 3 and len(s2) >= 3 and (s1.startswith(s2) or s2.startswith(s1)):
+            return True
+        return False
+
+    # 11. Candidate matching against active reminders
     matched_candidates = []
     for rem in active_reminders:
         if rem.get("completed", False):
@@ -198,11 +227,13 @@ def parse_conversational_reminder_intent(
             matched_candidates.append(rem)
             continue
 
-        # Word-overlap match: target keywords must be fully covered by reminder or vice versa
+        # Word-overlap match with stem/inflection tolerance
         if target_words and r_words:
-            if target_words.issubset(r_words) or r_words.issubset(target_words):
+            matched_target = {tw for tw in target_words if any(_words_match(tw, rw) for rw in r_words)}
+            matched_r = {rw for rw in r_words if any(_words_match(rw, tw) for tw in target_words)}
+            if len(matched_target) == len(target_words) or len(matched_r) == len(r_words):
                 matched_candidates.append(rem)
-            elif len(target_words.intersection(r_words)) >= max(2, len(target_words)):
+            elif len(matched_target) >= max(2, len(target_words)) or len(matched_target) >= max(2, len(r_words)):
                 matched_candidates.append(rem)
 
     # 6. Ambiguity Guard: if several reminders match, DO NOT silently guess!
@@ -644,8 +675,12 @@ async def inject_context(
 
             # Extract additional schema attributes
             forge_s = persona.get("forge_schema") if isinstance(persona.get("forge_schema"), dict) else {}
-            traits = persona.get("traits") or persona.get("personality_traits") or forge_s.get("personality", {}).get("core_traits", [])
-            flaws = forge_s.get("personality", {}).get("flaws", [])
+            traits = persona.get("traits") or persona.get("personality_traits")
+            if traits is None and isinstance(persona.get("personality"), (list, tuple)):
+                traits = persona.get("personality")
+            if traits is None:
+                traits = forge_s.get("personality", {}).get("core_traits", []) if isinstance(forge_s.get("personality"), dict) else []
+            flaws = forge_s.get("personality", {}).get("flaws", []) if isinstance(forge_s.get("personality"), dict) else (persona.get("personality", {}).get("flaws", []) if isinstance(persona.get("personality"), dict) else [])
             body_lang = forge_s.get("physicality", {}).get("body_language", "")
             boundaries = persona.get("mature_themes", {}).get("boundaries", "") if isinstance(persona.get("mature_themes"), dict) else forge_s.get("mature_themes", {}).get("boundaries", "")
 
@@ -722,7 +757,7 @@ async def inject_context(
 
         # Extract schema attributes
         forge_s = persona.get("forge_schema") if isinstance(persona.get("forge_schema"), dict) else {}
-        flaws = forge_s.get("personality", {}).get("flaws", [])
+        flaws = forge_s.get("personality", {}).get("flaws", []) if isinstance(forge_s.get("personality"), dict) else (persona.get("personality", {}).get("flaws", []) if isinstance(persona.get("personality"), dict) else [])
         body_lang = forge_s.get("physicality", {}).get("body_language", "")
         boundaries = persona.get("mature_themes", {}).get("boundaries", "") if isinstance(persona.get("mature_themes"), dict) else forge_s.get("mature_themes", {}).get("boundaries", "")
 
@@ -746,7 +781,11 @@ async def inject_context(
         if persona.get("tagline"):
             sections.append(f"[Tagline]\n{persona.get('tagline')}")
 
-        traits = persona.get("traits") or persona.get("personality_traits") or forge_s.get("personality", {}).get("core_traits", [])
+        traits = persona.get("traits") or persona.get("personality_traits")
+        if traits is None and isinstance(persona.get("personality"), (list, tuple)):
+            traits = persona.get("personality")
+        if traits is None:
+            traits = forge_s.get("personality", {}).get("core_traits", []) if isinstance(forge_s.get("personality"), dict) else []
         if traits:
             if isinstance(traits, (list, tuple, set)):
                 clean_traits = [str(t).strip() for t in traits if t is not None and str(t).strip()]

@@ -267,6 +267,7 @@ export default function PersonaForge() {
   const [suggestingTags, setSuggestingTags] = useState(false);
   const [sliders, setSliders] = useState(emptySliders());
   const [slidersTouched, setSlidersTouched] = useState(false);
+  const [tagsTouched, setTagsTouched] = useState(false);
 
   // Wiki Ingest State
   const [wikiName, setWikiName] = useState('');
@@ -300,6 +301,8 @@ export default function PersonaForge() {
           const currentTags = tags ? tags.split(',').map(t => t.trim()) : [];
           const newTags = [...new Set([...currentTags, ...generatedTags])].filter(Boolean).join(', ');
           setTags(newTags);
+          setTagsTouched(true);
+          setSlidersTouched(false);
         }
       }
     } catch (e) {
@@ -328,6 +331,7 @@ export default function PersonaForge() {
         const char = data.character || {};
         setEnhancedCharData(char);
         setSlidersTouched(false);
+        setTagsTouched(false);
         if (char.name) setName(char.name);
         if (char.personality?.archetype) setDescription(char.personality.archetype);
         if (char.personality?.core_traits) {
@@ -396,10 +400,13 @@ export default function PersonaForge() {
       : [];
 
     // Core traits resolution:
+    // If the user explicitly edited tags (tagsTouched === true), use user-entered tags (including empty list).
     // If the user explicitly moved sliders (slidersTouched === true), use slider traits.
     // Otherwise, preserve enhanced traits, user-entered tags, or previous saved traits.
     let resolvedCoreTraits;
-    if (slidersTouched) {
+    if (tagsTouched) {
+      resolvedCoreTraits = parsedTags;
+    } else if (slidersTouched) {
       resolvedCoreTraits = sliderDerivedTraits;
     } else if (Array.isArray(enhanced.personality?.core_traits) && enhanced.personality.core_traits.length > 0) {
       resolvedCoreTraits = enhanced.personality.core_traits;
@@ -572,6 +579,7 @@ export default function PersonaForge() {
     setFormError('');
     setEnhancedCharData(null);
     setSlidersTouched(false);
+    setTagsTouched(false);
     if (persona) {
       setEditingPersona(persona);
       setName(persona.name || '');
@@ -706,7 +714,11 @@ export default function PersonaForge() {
               <Input
                 label="Tags (Comma separated)"
                 value={tags}
-                onChange={setTags}
+                onChange={val => {
+                  setTags(val);
+                  setTagsTouched(true);
+                  setSlidersTouched(false);
+                }}
                 placeholder="Cyberpunk, Pilot..."
                 className="mb-0"
               />
@@ -731,17 +743,17 @@ export default function PersonaForge() {
             <Slider
               label="Order/Chaos" leftLabel="Order" rightLabel="Chaos"
               value={sliders.order_chaos}
-              onChange={v => { setSlidersTouched(true); setSliders(s => ({ ...s, order_chaos: v })); }}
+              onChange={v => { setSlidersTouched(true); setTagsTouched(false); setSliders(s => ({ ...s, order_chaos: v })); }}
             />
             <Slider
               label="Optimism/Cynicism" leftLabel="Optimism" rightLabel="Cynicism"
               value={sliders.optimism_cynicism}
-              onChange={v => { setSlidersTouched(true); setSliders(s => ({ ...s, optimism_cynicism: v })); }}
+              onChange={v => { setSlidersTouched(true); setTagsTouched(false); setSliders(s => ({ ...s, optimism_cynicism: v })); }}
             />
             <Slider
               label="Introvert/Extrovert" leftLabel="Introvert" rightLabel="Extrovert"
               value={sliders.intro_extro}
-              onChange={v => { setSlidersTouched(true); setSliders(s => ({ ...s, intro_extro: v })); }}
+              onChange={v => { setSlidersTouched(true); setTagsTouched(false); setSliders(s => ({ ...s, intro_extro: v })); }}
             />
           </div>
 

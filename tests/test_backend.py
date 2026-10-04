@@ -194,8 +194,25 @@ def test_persona_compile_endpoint(client):
 # 5. Chat Stream SSE Protocol
 # ----------------------------------------------------------------------
 
-def test_chat_stream_sse_protocol(client):
+def test_chat_stream_sse_protocol(client, monkeypatch):
     """Verify POST /api/chat/stream returns valid Server-Sent Events with tokens and done: true."""
+    class DummyStreamResponse:
+        status_code = 200
+        async def aiter_lines(self):
+            chunks = [
+                json.dumps({"message": {"content": "Hello"}, "done": False}),
+                json.dumps({"message": {"content": " world!"}, "done": True}),
+            ]
+            for c in chunks:
+                yield c
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    import httpx
+    monkeypatch.setattr(httpx.AsyncClient, "stream", lambda *args, **kwargs: DummyStreamResponse())
+
     payload = {
         "message": "Janus, give me a status report on today's milestones.",
         "mode": "assistant",
@@ -217,6 +234,22 @@ def test_chat_stream_sse_protocol(client):
     # Verify terminal event
     has_terminal = any(e.get("done") is True for e in events)
     assert has_terminal, "SSE stream must emit a terminal done: true event"
+
+
+def test_chat_stream_offline_degraded(client, monkeypatch):
+    """Verify that when GPU chat engine is unreachable, SSE stream emits structured error event."""
+    import httpx
+    def raise_connect_error(*args, **kwargs):
+        raise httpx.ConnectError("Connection refused")
+    monkeypatch.setattr(httpx.AsyncClient, "stream", raise_connect_error)
+
+    resp = client.post("/api/chat/stream", json={"message": "ping"})
+    assert resp.status_code == 200
+    events = parse_sse_events(resp.text)
+    assert len(events) == 1
+    assert events[0].get("done") is True
+    assert events[0].get("degraded") is True
+    assert "offline" in events[0].get("error", "").lower()
 
 
 def test_chat_stream_with_messages_array(client):

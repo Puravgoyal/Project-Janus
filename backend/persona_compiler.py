@@ -731,7 +731,7 @@ def compile_persona_system_prompt(
     raw_arch = p.get("archetype")
     archetype = str(raw_arch or char_desc or "Character").strip() or "Character"
 
-    # Core traits: explicit traits parameter has highest priority, then personality.core_traits
+    # Core traits: explicit traits parameter has highest priority, then personality.core_traits, then legacy personality list
     final_traits: list[str] = []
     if traits is not None:
         final_traits = [str(t).strip() for t in traits if str(t).strip()]
@@ -741,6 +741,8 @@ def compile_persona_system_prompt(
             final_traits = [t.strip() for t in raw_t.split(",") if t.strip()]
         elif isinstance(raw_t, (list, tuple)):
             final_traits = [str(t).strip() for t in raw_t if str(t).strip()]
+    elif isinstance(personality, (list, tuple)):
+        final_traits = [str(t).strip() for t in personality if str(t).strip()]
 
     raw_flaws = p.get("flaws", [])
     if isinstance(raw_flaws, str):

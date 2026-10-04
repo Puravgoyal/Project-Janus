@@ -503,6 +503,18 @@ async def list_personas():
     return await storage.load_personas()
 
 
+@app.get("/api/personas/{name}")
+async def get_persona_by_name(name: str):
+    """Retrieve a specific persona card by ID."""
+    persona = await storage.get_persona(name)
+    if not persona:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Persona '{name}' not found."
+        )
+    return persona
+
+
 @app.get("/api/reminders")
 async def list_reminders():
     """Retrieve all reminders."""
@@ -789,6 +801,38 @@ async def update_persona(name: str, request: Request, incognito: Optional[bool] 
                 detail="The core Janus persona cannot be replaced or overwritten by arbitrary personas."
             )
 
+    # Validate input types
+    if "personality" in data:
+        p_val = data["personality"]
+        if p_val is not None and not isinstance(p_val, (dict, list, tuple, str)):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid personality format. Expected dict, list, string, or null."
+            )
+
+    if "forge_schema" in data:
+        fs_val = data["forge_schema"]
+        if fs_val is not None and not isinstance(fs_val, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid forge_schema format. Expected dict or null."
+            )
+        if isinstance(fs_val, dict) and "personality" in fs_val:
+            fs_p = fs_val["personality"]
+            if fs_p is not None and not isinstance(fs_p, (dict, list, tuple, str)):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid forge_schema personality format. Expected dict, list, string, or null."
+                )
+
+    if "traits" in data:
+        tr_val = data["traits"]
+        if tr_val is not None and not isinstance(tr_val, (list, tuple, str)):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid traits format. Expected list, string, or null."
+            )
+
     # Regenerate canonical system_prompt when behavioral/identity fields change
     existing_persona = await storage.get_persona(name)
 
@@ -797,40 +841,110 @@ async def update_persona(name: str, request: Request, incognito: Optional[bool] 
 
     roleplay_style = memory_engine._extract_roleplay_style(data)
     forge_schema = data.get("forge_schema") if isinstance(data.get("forge_schema"), dict) else {}
-    personality = forge_schema.get("personality") or data.get("personality") or {}
+    personality = forge_schema.get("personality") if ("personality" in forge_schema and forge_schema.get("personality") is not None) else (data.get("personality") if "personality" in data else {})
+    if personality is None:
+        personality = {}
     emotion = forge_schema.get("emotion") or data.get("emotion") or {}
     physicality = forge_schema.get("physicality") or data.get("physicality") or {}
     mature = forge_schema.get("mature_themes") or data.get("mature_themes") or {}
 
-    # Consistent authoritative trait extraction:
-    # If forge_schema (or personality dict) specifies core_traits, it takes precedence.
-    # Otherwise, fall back to top-level traits / personality_traits.
-    traits = []
-    forge_core_traits = None
-    if isinstance(personality, dict) and "core_traits" in personality:
-        raw_ct = personality["core_traits"]
-        if isinstance(raw_ct, str):
-            forge_core_traits = [t.strip() for t in raw_ct.split(",") if t.strip()]
-        elif isinstance(raw_ct, (list, tuple)):
-            forge_core_traits = [str(t).strip() for t in raw_ct if str(t).strip()]
+    # Extract authoritative traits distinguishing explicit clear ([]) from absence (None):
+    traits: list[str] = []
+    has_explicit_traits = False
 
-    if forge_core_traits:
-        traits = forge_core_traits
-    else:
-        raw_traits = data.get("traits") or data.get("personality_traits") or []
-        if isinstance(raw_traits, str):
-            traits = [t.strip() for t in raw_traits.split(",") if t.strip()]
-        elif isinstance(raw_traits, (list, tuple)):
-            traits = [str(t).strip() for t in raw_traits if str(t).strip()]
-        elif forge_core_traits is not None:
-            traits = forge_core_traits
+    if isinstance(forge_schema.get("personality"), dict) and "core_traits" in forge_schema["personality"]:
+        has_explicit_traits = True
+        raw_ct = forge_schema["personality"]["core_traits"]
+        if isinstance(raw_ct, str):
+            traits = [t.strip() for t in raw_ct.split(",") if t.strip()]
+        elif isinstance(raw_ct, (list, tuple)):
+            traits = [str(t).strip() for t in raw_ct if str(t).strip()]
+        else:
+            traits = []
+    elif isinstance(forge_schema.get("personality"), (list, tuple)):
+        has_explicit_traits = True
+        traits = [str(t).strip() for t in forge_schema["personality"] if str(t).strip()]
+    elif "personality" in data and isinstance(data["personality"], (dict, list, tuple)):
+        has_explicit_traits = True
+        raw_p = data["personality"]
+        if isinstance(raw_p, dict) and "core_traits" in raw_p:
+            raw_ct = raw_p["core_traits"]
+            if isinstance(raw_ct, str):
+                traits = [t.strip() for t in raw_ct.split(",") if t.strip()]
+            elif isinstance(raw_ct, (list, tuple)):
+                traits = [str(t).strip() for t in raw_ct if str(t).strip()]
+            else:
+                traits = []
+        elif isinstance(raw_p, (list, tuple)):
+            traits = [str(t).strip() for t in raw_p if str(t).strip()]
+        else:
+            traits = []
+    elif "traits" in data:
+        has_explicit_traits = True
+        raw_tr = data["traits"]
+        if isinstance(raw_tr, str):
+            traits = [t.strip() for t in raw_tr.split(",") if t.strip()]
+        elif isinstance(raw_tr, (list, tuple)):
+            traits = [str(t).strip() for t in raw_tr if str(t).strip()]
+        else:
+            traits = []
+    elif "personality_traits" in data:
+        has_explicit_traits = True
+        raw_pt = data["personality_traits"]
+        if isinstance(raw_pt, str):
+            traits = [t.strip() for t in raw_pt.split(",") if t.strip()]
+        elif isinstance(raw_pt, (list, tuple)):
+            traits = [str(t).strip() for t in raw_pt if str(t).strip()]
+        else:
+            traits = []
+    elif "personality" in data:
+        has_explicit_traits = True
+        raw_p = data["personality"]
+        if isinstance(raw_p, str):
+            traits = [t.strip() for t in raw_p.split(",") if t.strip()]
+        else:
+            traits = []
+    elif existing_persona:
+        old_forge = existing_persona.get("forge_schema") if isinstance(existing_persona.get("forge_schema"), dict) else {}
+        old_p = old_forge.get("personality") or existing_persona.get("personality") or {}
+        if isinstance(old_p, dict):
+            raw_t = (
+                old_p.get("core_traits")
+                or existing_persona.get("traits")
+                or existing_persona.get("personality_traits")
+                or []
+            )
+        elif isinstance(old_p, (list, tuple)):
+            raw_t = old_p
+        else:
+            raw_t = existing_persona.get("traits") or existing_persona.get("personality_traits") or []
+        if isinstance(raw_t, str):
+            traits = [t.strip() for t in raw_t.split(",") if t.strip()]
+        elif isinstance(raw_t, (list, tuple)):
+            traits = [str(t).strip() for t in raw_t if str(t).strip()]
+        else:
+            traits = []
 
     # Synchronize trait representations across the card
     data["traits"] = traits
     data["personality_traits"] = traits
-    data["personality"] = traits
     if isinstance(personality, dict):
         personality["core_traits"] = traits
+        data["personality"] = personality
+    elif isinstance(personality, (list, tuple)):
+        data["personality"] = traits
+    elif personality is None:
+        data["personality"] = traits
+    elif "personality" not in data:
+        if existing_persona and isinstance(existing_persona.get("personality"), dict):
+            p_dict = dict(existing_persona["personality"])
+            p_dict["core_traits"] = traits
+            data["personality"] = p_dict
+        elif existing_persona and isinstance(existing_persona.get("personality"), (list, tuple)):
+            data["personality"] = traits
+        else:
+            data["personality"] = traits
+
     if "forge_schema" in data and isinstance(data["forge_schema"], dict):
         if "personality" in data["forge_schema"] and isinstance(data["forge_schema"]["personality"], dict):
             data["forge_schema"]["personality"]["core_traits"] = traits
@@ -849,12 +963,21 @@ async def update_persona(name: str, request: Request, incognito: Optional[bool] 
         old_desc = str(existing_persona.get("description") or "").strip()
         old_forge = existing_persona.get("forge_schema") if isinstance(existing_persona.get("forge_schema"), dict) else {}
         old_personality = old_forge.get("personality") or existing_persona.get("personality") or {}
-        old_traits = (
-            old_personality.get("core_traits")
-            or existing_persona.get("traits")
-            or existing_persona.get("personality_traits")
-            or []
-        )
+        if isinstance(old_personality, dict):
+            old_traits = (
+                old_personality.get("core_traits")
+                or existing_persona.get("traits")
+                or existing_persona.get("personality_traits")
+                or []
+            )
+        elif isinstance(old_personality, (list, tuple)):
+            old_traits = old_personality
+        else:
+            old_traits = (
+                existing_persona.get("traits")
+                or existing_persona.get("personality_traits")
+                or []
+            )
         if isinstance(old_traits, str):
             old_traits = [t.strip() for t in old_traits.split(",") if t.strip()]
         elif isinstance(old_traits, (list, tuple)):
