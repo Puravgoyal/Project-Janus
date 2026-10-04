@@ -482,21 +482,72 @@ class TestFeature13EndpointPostChatStream(unittest.TestCase):
         self.assertIn("text/event-stream", resp.headers.get("content-type", ""))
 
     def test_chat_stream_event_data_structure(self):
-        """13.2 Verify SSE stream sends data: prefixed JSON objects with token key (or structured error when GPU offline)."""
-        client = OpaqueClient()
-        resp = client.post("/api/chat/stream", json_data={"messages": [{"role": "user", "content": "Hello"}]})
-        events = parse_sse_events(resp.text)
-        self.assertTrue(len(events) > 0)
-        first_event = events[0]
-        self.assertTrue("token" in first_event or "error" in first_event)
-        self.assertIn("done", first_event)
+        """13.2 Verify SSE stream sends data: prefixed JSON objects with token key and done: false."""
+        class DummyStreamResponse:
+            status_code = 200
+            async def aiter_lines(self):
+                chunks = [
+                    json.dumps({"message": {"content": "Hello"}, "done": False}),
+                    json.dumps({"message": {"content": " world!"}, "done": True}),
+                ]
+                for c in chunks:
+                    yield c
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        from unittest.mock import patch
+        with patch("httpx.AsyncClient.stream", return_value=DummyStreamResponse()):
+            client = OpaqueClient()
+            resp = client.post("/api/chat/stream", json_data={"messages": [{"role": "user", "content": "Hello"}]})
+            events = parse_sse_events(resp.text)
+            self.assertTrue(len(events) > 0)
+            first_event = events[0]
+            self.assertIn("token", first_event)
+            self.assertNotIn("error", first_event)
+            self.assertFalse(first_event["done"])
+            self.assertTrue(any(e.get("done") is True for e in events))
+
+    def test_chat_stream_failure_structured_error(self):
+        """13.2b Verify SSE stream emits structured error and no fake success when GPU engine fails."""
+        import httpx
+        from unittest.mock import patch
+        def raise_connect_error(*args, **kwargs):
+            raise httpx.ConnectError("GPU offline")
+
+        with patch("httpx.AsyncClient.stream", side_effect=raise_connect_error):
+            client = OpaqueClient()
+            resp = client.post("/api/chat/stream", json_data={"messages": [{"role": "user", "content": "Hello"}]})
+            events = parse_sse_events(resp.text)
+            self.assertTrue(len(events) > 0)
+            first_event = events[0]
+            self.assertIn("error", first_event)
+            self.assertNotIn("token", first_event)
+            self.assertTrue(first_event.get("done"))
+            self.assertTrue(first_event.get("interrupted"))
 
     def test_chat_stream_terminal_done_event(self):
         """13.3 Verify final SSE event contains done: true."""
-        client = OpaqueClient()
-        resp = client.post("/api/chat/stream", json_data={"messages": [{"role": "user", "content": "Test done"}]})
-        events = parse_sse_events(resp.text)
-        self.assertTrue(any(e.get("done") is True for e in events))
+        class DummyStreamResponse:
+            status_code = 200
+            async def aiter_lines(self):
+                chunks = [
+                    json.dumps({"message": {"content": "Test done"}, "done": True}),
+                ]
+                for c in chunks:
+                    yield c
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        from unittest.mock import patch
+        with patch("httpx.AsyncClient.stream", return_value=DummyStreamResponse()):
+            client = OpaqueClient()
+            resp = client.post("/api/chat/stream", json_data={"messages": [{"role": "user", "content": "Test done"}]})
+            events = parse_sse_events(resp.text)
+            self.assertTrue(any(e.get("done") is True for e in events))
 
     def test_chat_stream_dispatches_gpu_engine(self):
         """13.4 Verify chat streaming route interacts with GPU engine on Port 11434."""

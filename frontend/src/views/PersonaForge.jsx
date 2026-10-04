@@ -410,12 +410,25 @@ export default function PersonaForge() {
       resolvedCoreTraits = sliderDerivedTraits;
     } else if (Array.isArray(enhanced.personality?.core_traits) && enhanced.personality.core_traits.length > 0) {
       resolvedCoreTraits = enhanced.personality.core_traits;
+    } else if (editingPersona) {
+      // When editing an existing persona, preserve its explicit traits (even if empty [])
+      if (Array.isArray(_prevForge?.personality?.core_traits)) {
+        resolvedCoreTraits = _prevForge.personality.core_traits;
+      } else if (Array.isArray(cleanBaseFields.traits)) {
+        resolvedCoreTraits = cleanBaseFields.traits;
+      } else if (Array.isArray(cleanBaseFields.personality_traits)) {
+        resolvedCoreTraits = cleanBaseFields.personality_traits;
+      } else if (Array.isArray(cleanBaseFields.personality)) {
+        resolvedCoreTraits = cleanBaseFields.personality;
+      } else if (Array.isArray(cleanBaseFields.personality?.core_traits)) {
+        resolvedCoreTraits = cleanBaseFields.personality.core_traits;
+      } else if (parsedTags.length > 0) {
+        resolvedCoreTraits = parsedTags;
+      } else {
+        resolvedCoreTraits = sliderDerivedTraits;
+      }
     } else if (parsedTags.length > 0) {
       resolvedCoreTraits = parsedTags;
-    } else if (Array.isArray(_prevForge?.personality?.core_traits) && _prevForge.personality.core_traits.length > 0) {
-      resolvedCoreTraits = _prevForge.personality.core_traits;
-    } else if (Array.isArray(cleanBaseFields.traits) && cleanBaseFields.traits.length > 0) {
-      resolvedCoreTraits = cleanBaseFields.traits;
     } else {
       resolvedCoreTraits = sliderDerivedTraits;
     }

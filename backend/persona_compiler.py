@@ -45,11 +45,9 @@ class PersonalitySchema(BaseModel):
         if v is None:
             return ["Perceptive", "Determined", "Resourceful", "Adaptable"]
         if isinstance(v, str):
-            res = [t.strip() for t in v.split(",") if t.strip()]
-            return res if res else ["Perceptive", "Determined", "Resourceful", "Adaptable"]
+            return [t.strip() for t in v.split(",") if t.strip()]
         if isinstance(v, (list, tuple)):
-            res = [str(t).strip() for t in v if t is not None and str(t).strip()]
-            return res if res else ["Perceptive", "Determined", "Resourceful", "Adaptable"]
+            return [str(t).strip() for t in v if t is not None and str(t).strip()]
         return ["Perceptive", "Determined", "Resourceful", "Adaptable"]
 
     @field_validator("flaws", mode="before")
@@ -820,14 +818,34 @@ async def forge_character(character_data: dict[str, Any], incognito: bool = Fals
     if len(roleplay_style) > 2500:
         roleplay_style = roleplay_style[:2500].rstrip()
 
-    raw_traits = personality.get("core_traits")
-    if isinstance(raw_traits, str):
-        traits = [t.strip() for t in raw_traits.split(",") if t.strip()]
-    elif isinstance(raw_traits, (list, tuple)):
-        traits = [str(t).strip() for t in raw_traits if str(t).strip()]
-    else:
-        traits = ["Adaptive", "Articulate"]
-    if not traits:
+    has_explicit_traits = False
+    traits: list[str] = []
+    if "core_traits" in personality and personality["core_traits"] is not None:
+        has_explicit_traits = True
+        raw_traits = personality["core_traits"]
+        if isinstance(raw_traits, str):
+            traits = [t.strip() for t in raw_traits.split(",") if t.strip()]
+        elif isinstance(raw_traits, (list, tuple)):
+            traits = [str(t).strip() for t in raw_traits if str(t).strip()]
+    elif "traits" in character_data and character_data["traits"] is not None:
+        has_explicit_traits = True
+        raw_traits = character_data["traits"]
+        if isinstance(raw_traits, str):
+            traits = [t.strip() for t in raw_traits.split(",") if t.strip()]
+        elif isinstance(raw_traits, (list, tuple)):
+            traits = [str(t).strip() for t in raw_traits if str(t).strip()]
+    elif "personality_traits" in character_data and character_data["personality_traits"] is not None:
+        has_explicit_traits = True
+        raw_traits = character_data["personality_traits"]
+        if isinstance(raw_traits, str):
+            traits = [t.strip() for t in raw_traits.split(",") if t.strip()]
+        elif isinstance(raw_traits, (list, tuple)):
+            traits = [str(t).strip() for t in raw_traits if str(t).strip()]
+    elif isinstance(character_data.get("personality"), (list, tuple)):
+        has_explicit_traits = True
+        traits = [str(t).strip() for t in character_data["personality"] if str(t).strip()]
+
+    if not has_explicit_traits:
         traits = ["Adaptive", "Articulate"]
 
     raw_flaws = personality.get("flaws")
@@ -871,6 +889,7 @@ async def forge_character(character_data: dict[str, Any], incognito: bool = Fals
             "character": incognito_char,
         }
 
+    traits_desc = f"Core traits: {', '.join(traits)}. " if traits else ""
     persona_card: dict[str, Any] = {
         "id": slug,
         "name": name,
@@ -878,7 +897,7 @@ async def forge_character(character_data: dict[str, Any], incognito: bool = Fals
         "avatar": _pick_avatar_emoji(name, system_prompt),
         "description": (
             f"{personality.get('archetype', '')} character. "
-            f"Core traits: {', '.join(traits)}. "
+            f"{traits_desc}"
             f"Flaws: {', '.join(flaws)}."
         ),
         "system_prompt": system_prompt,

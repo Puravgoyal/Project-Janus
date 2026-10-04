@@ -83,169 +83,195 @@ STOPWORDS = {
 }
 
 
+def _stem_reminder_word(w: str) -> str:
+    """Helper to normalize English inflections without conflating unrelated words."""
+    w = w.lower().strip()
+    for suffix in ("ing", "ed", "es", "s"):
+        if w.endswith(suffix) and len(w) - len(suffix) >= 3:
+            w = w[:-len(suffix)]
+            break
+    if len(w) >= 4 and w[-1] == w[-2] and w[-1] not in ("s", "l"):
+        w = w[:-1]
+    if w.endswith("e") and len(w) >= 4:
+        w = w[:-1]
+    return w
+
+
+def _words_match(w1: str, w2: str) -> bool:
+    """Match words based on exact equality or legitimate inflection stems (e.g. reviewing -> review)."""
+    w1_clean, w2_clean = w1.lower().strip(), w2.lower().strip()
+    if w1_clean == w2_clean:
+        return True
+    return _stem_reminder_word(w1_clean) == _stem_reminder_word(w2_clean)
+
+
 def parse_conversational_reminder_intent(
     user_text: str,
     active_reminders: list[dict[str, Any]]
 ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """
     Conservatively parses user message to detect unambiguous affirmative completion or cancellation intent.
-    Handles negation, questions, future intentions, quoted statements, and ambiguity.
+    Interprets intent within the relevant clause/sentence rather than discarding the whole message
+    due to adjacent future or incidental statements.
+    Rejects negation, questions, future plans, quotations, uncertainty, and ambiguity.
     Returns: (matching_reminder_dict, "completed" | "cancelled") or (None, None).
     """
     clean_text = (user_text or "").strip()
     if not clean_text or not active_reminders:
         return None, None
 
-    # Normalize Unicode quotation marks / apostrophes to ASCII equivalents so
-    # regex patterns using ' work regardless of locale or input method.
+    # Normalize Unicode quotation marks / apostrophes to ASCII equivalents
     clean_text = (
         clean_text
-        .replace("\u2019", "'")   # right single quotation mark  →  apostrophe
-        .replace("\u2018", "'")   # left single quotation mark   →  apostrophe
-        .replace("\u201c", '"')   # left double quotation mark   →  "
-        .replace("\u201d", '"')   # right double quotation mark  →  "
+        .replace("\u2019", "'")
+        .replace("\u2018", "'")
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
     )
 
-    lower = clean_text.lower()
-
-    # 1. Question guard: Questions are inquiries, never affirmative completion
-    if "?" in clean_text or re.search(r"^(?:have|has|did|is|was|can|could|will|should|do|does)\s+(?:i|we|you)\b", lower):
+    # 1. Whole message quotation guard
+    if clean_text.startswith(('"', "'")) and clean_text.endswith(('"', "'")):
         return None, None
 
-    # 2. Quotation / Embedded quotation guard: if completion verb is inside quotes or the entire message is quoted
-    if re.search(r'["\'](?:[^"\']*\b(?:finished|completed|done)\b[^"\']*)["\']', clean_text) or (clean_text.startswith(('"', "'")) and clean_text.endswith(('"', "'"))):
-        return None, None
+    # Segment message into sentence clauses
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?;\n])\s+", clean_text) if s.strip()]
+    if not sentences:
+        sentences = [clean_text]
 
-    # 3. Example / Demonstration guard: sentences describing examples or samples
-    if re.search(r"\b(?:for\s+example|example\s+is|e\.g\.|sample|instance|quote|citation)\b", lower):
-        return None, None
-
-    # 4. Uncertainty & Doubt guard: "I doubt I finished...", "unsure if I finished...", etc.
-    if re.search(r"\b(?:doubt|doubts|doubting|doubtful|unsure|not\s+sure|don'?t\s+think|wonder|wondering|uncertain|hesitate|hesitant)\b", lower):
-        return None, None
-
-    # 5. Future intent guard: Future plans or promises are not completed tasks
-    if re.search(r"\b(?:will|shall|going\s+to|plan\s+to|planning\s+to|intend\s+to|hope\s+to|tomorrow|later|next\s+week|soon|afterwards)\b", lower):
-        return None, None
-
-    # 6. Hypothetical & conditional guard: "if I finish", "imagine I finished", "pretend", "suppose", etc.
-    if re.search(r"\b(?:if|imagine|pretend|suppose|supposing|assuming|what\s+if|let'?s\s+say|in\s+case|whenever|wish|wishing|hope)\b", lower):
-        return None, None
-
-    # 7. Partial completion guard: "almost finished", "nearly completed", "barely", etc.
-    if re.search(r"\b(?:almost|nearly|barely|partially|partly|halfway|close\s+to|not\s+quite|started|began)\b", lower):
-        return None, None
-
-    # 8. Negation & unfinished guard: Explicit statements that the item is incomplete
-    if re.search(r"\b(?:not|haven't|have\s+not|didn't|did\s+not|hasn't|has\s+not|unfinished|not\s+yet|incomplete|still\s+working|still\s+need|yet\s+to|in\s+progress)\b", lower):
-        return None, None
-
-    # 9. Reported-speech & attribution guard: "Alice said/told/wrote ...", attribution verbs
-    if re.search(
+    reported_speech_pattern = (
         r"\b(?:said|says|told|tells|wrote|writes|texted|texts|mentioned|mentions|replied|replies|reported|reports|claimed|claims|admitted|admits|announced|announces|heard)\b|"
-        r"\b(?:noted|notes|thought)\s+(?:that\b|[\"'])",
-        lower
-    ):
-        return None, None
-
-    # 10. Detect Intent & extract target topic
-    is_completion = False
-    is_cancellation = False
-    target_phrase = ""
-
-    # Direct first-person completion: "I finished/completed/am done with..."
-    comp_match = re.search(
-        r"\b(?:i(?:'m|\s+am|'ve|\s+have)?\s+(?:just\s+)?done(?:\s+with)?|i(?:(?:'ve|\s+have)?\s+(?:just\s+)?|\s+)(?:finished|completed))\s+(.+?)(?:[.!;]|$)",
-        lower
+        r"\b(?:noted|notes|thought)\s+(?:that\b|[\"'])"
     )
-    if not comp_match:
-        # Sentence-initial or imperative: "finished...", "mark as done...", "completed..."
+
+    for idx, s in enumerate(sentences):
+        s_lower = s.lower()
+
+        # Detect direct completion
         comp_match = re.search(
-            r"^(?:(?:just\s+)?(?:finished|completed|done\s+with)|mark(?:\s+as)?\s+(?:done|completed)|completed|finished)\s+(.+?)(?:[.!;]|$)",
-            lower
+            r"\b(?:i(?:'m|\s+am|'ve|\s+have)?\s+(?:just\s+)?done(?:\s+with)?|i(?:(?:'ve|\s+have)?\s+(?:just\s+)?|\s+)(?:finished|completed))\s+(.+?)(?:[.!;]|$)",
+            s_lower
         )
-    if not comp_match:
-        # "mark [the] [reminder/task] <target> as done/completed"
-        comp_match = re.search(
-            r"\bmark\s+(?:the\s+)?(?:reminder\s+|task\s+)?(.+?)\s+(?:as\s+)?(?:done|completed|finished)(?:[.!;]|$)",
-            lower
-        )
+        if not comp_match:
+            comp_match = re.search(
+                r"^(?:(?:just\s+)?(?:finished|completed|done\s+with)|mark(?:\s+as)?\s+(?:done|completed)|completed|finished)\s+(.+?)(?:[.!;]|$)",
+                s_lower
+            )
+        if not comp_match:
+            comp_match = re.search(
+                r"\bmark\s+(?:the\s+)?(?:reminder\s+|task\s+)?(.+?)\s+(?:as\s+)?(?:done|completed|finished)(?:[.!;]|$)",
+                s_lower
+            )
+        is_completion = bool(comp_match)
 
-    if comp_match:
-        is_completion = True
-        target_phrase = comp_match.group(1).strip()
-    else:
-        canc_match = re.search(
-            r"\b(?:cancel|remove|delete|dismiss)\s+(?:the\s+)?(?:reminder|task)\s+(?:for\s+|to\s+|called\s+)?(.+?)(?:[.!;]|$)",
-            lower
-        )
-        if canc_match:
-            is_cancellation = True
-            target_phrase = canc_match.group(1).strip()
+        canc_match = None
+        if not is_completion:
+            canc_match = re.search(
+                r"\b(?:cancel|remove|delete|dismiss)\s+(?:the\s+)?(?:reminder|task)\s+(?:for\s+|to\s+|called\s+)?(.+?)(?:[.!;]|$)",
+                s_lower
+            )
+        is_cancellation = bool(canc_match)
 
-    if not is_completion and not is_cancellation:
-        return None, None
-
-    # Clean target phrase
-    target_clean = re.sub(r"[^\w\s]", "", target_phrase).strip()
-    if not target_clean:
-        return None, None
-
-    target_words = {w for w in target_clean.split() if w not in STOPWORDS and len(w) > 2}
-    if not target_words:
-        target_words = set(target_clean.split())
-
-    # Suffix stemming helper for inflection tolerance (e.g. reviewing -> review)
-    def _words_match(w1: str, w2: str) -> bool:
-        if w1 == w2:
-            return True
-        def stem(w: str) -> str:
-            for suffix in ("ing", "ed", "es", "s"):
-                if w.endswith(suffix) and len(w) - len(suffix) >= 3:
-                    return w[:-len(suffix)]
-            return w
-        s1, s2 = stem(w1), stem(w2)
-        if s1 == s2:
-            return True
-        if len(s1) >= 3 and len(s2) >= 3 and (s1.startswith(s2) or s2.startswith(s1)):
-            return True
-        return False
-
-    # 11. Candidate matching against active reminders
-    matched_candidates = []
-    for rem in active_reminders:
-        if rem.get("completed", False):
-            continue
-        r_text = str(rem.get("text", "")).strip().lower()
-        r_clean = re.sub(r"[^\w\s]", "", r_text).strip()
-        r_words = {w for w in r_clean.split() if w not in STOPWORDS and len(w) > 2}
-        if not r_words:
-            r_words = set(r_clean.split())
-
-        # Exact substring match
-        if target_clean in r_clean or r_clean in target_clean:
-            matched_candidates.append(rem)
+        if not is_completion and not is_cancellation:
             continue
 
-        # Word-overlap match with stem/inflection tolerance
-        if target_words and r_words:
-            matched_target = {tw for tw in target_words if any(_words_match(tw, rw) for rw in r_words)}
-            matched_r = {rw for rw in r_words if any(_words_match(rw, tw) for tw in target_words)}
-            if len(matched_target) == len(target_words) or len(matched_r) == len(r_words):
-                matched_candidates.append(rem)
-            elif len(matched_target) >= max(2, len(target_words)) or len(matched_target) >= max(2, len(r_words)):
-                matched_candidates.append(rem)
+        # Evaluate guards on the relevant clause / sentence:
+        # A. Embedded quotation guard (e.g. 'The example is "I finished the report."')
+        if re.search(r'["\'](?:[^"\']*\b(?:finished|completed|done)\b[^"\']*)["\']', s):
+            return None, None
 
-    # 6. Ambiguity Guard: if several reminders match, DO NOT silently guess!
-    if len(matched_candidates) == 1:
-        action_type = "completed" if is_completion else "cancelled"
-        return matched_candidates[0], action_type
-    elif len(matched_candidates) > 1:
-        logger.info(
-            "Ambiguous reminder match: '%s' matched %d reminders; skipping automated completion.",
-            clean_text, len(matched_candidates)
-        )
-        return None, None
+        # B. Question guard
+        if "?" in s or re.search(r"^(?:have|has|did|is|was|can|could|will|should|do|does)\s+(?:i|we|you)\b", s_lower):
+            return None, None
+
+        # C. Example / Demonstration guard
+        if re.search(r"\b(?:for\s+example|as\s+an\s+example|(?:the|this|an)\s+example\s+is|e\.g\.|for\s+instance|as\s+a\s+sample|sample\s+(?:sentence|input|text|task|reminder)|citation)\b", s_lower):
+            return None, None
+
+        # D. Uncertainty & Doubt guard
+        if re.search(r"\b(?:maybe|perhaps|possibly|might|could\s+be|doubt|doubts|doubting|doubtful|unsure|not\s+sure|don'?t\s+think|wonder|wondering|uncertain|hesitate|hesitant|not\s+certain)\b", s_lower):
+            return None, None
+
+        # E. Future intent guard in completion clause
+        if re.search(r"\b(?:will|shall|going\s+to|plan\s+to|planning\s+to|intend\s+to|hope\s+to|tomorrow|later|next\s+week|soon|afterwards)\b", s_lower):
+            return None, None
+
+        # F. Hypothetical & Conditional guard
+        if re.search(r"\b(?:if|imagine|pretend|suppose|supposing|assuming|what\s+if|let'?s\s+say|in\s+case|whenever|wish|wishing|hope)\b", s_lower):
+            return None, None
+
+        # G. Partial completion guard
+        if re.search(r"\b(?:almost|nearly|barely|partially|partly|halfway|close\s+to|not\s+quite|started|began)\b", s_lower):
+            return None, None
+
+        # H. Negation & unfinished guard
+        if re.search(r"\b(?:not|haven't|have\s+not|didn't|did\s+not|hasn't|has\s+not|unfinished|not\s+yet|incomplete|still\s+working|still\s+need|yet\s+to|in\s+progress)\b", s_lower):
+            return None, None
+
+        # I. Reported-speech & attribution guard in this clause
+        if re.search(reported_speech_pattern, s_lower):
+            return None, None
+
+        # J. Prior reported speech governing this clause
+        prior_text = " ".join(sentences[:idx]).lower()
+        if prior_text and re.search(reported_speech_pattern, prior_text):
+            return None, None
+
+        # Extract and clean target phrase
+        target_phrase = (comp_match or canc_match).group(1).strip()
+        target_phrase = re.split(r"\s+(?:and|but|however|then)\s+", target_phrase)[0]
+        target_clean = re.sub(r"[^\w\s]", "", target_phrase).strip()
+        if not target_clean:
+            return None, None
+
+        target_words = {w for w in target_clean.split() if w not in STOPWORDS and len(w) > 2}
+        if not target_words:
+            target_words = set(target_clean.split())
+
+        matched_candidates = []
+        for rem in active_reminders:
+            if rem.get("completed", False):
+                continue
+            r_text = str(rem.get("text", "")).strip().lower()
+            r_clean = re.sub(r"[^\w\s]", "", r_text).strip()
+            r_words = {w for w in r_clean.split() if w not in STOPWORDS and len(w) > 2}
+            if not r_words:
+                r_words = set(r_clean.split())
+
+            # Exact string match
+            if target_clean == r_clean:
+                matched_candidates.append(rem)
+                continue
+
+            # Word-level overlap with strict inflection matching
+            if target_words and r_words:
+                matched_target = {tw for tw in target_words if any(_words_match(tw, rw) for rw in r_words)}
+                matched_r = {rw for rw in r_words if any(_words_match(rw, tw) for tw in target_words)}
+
+                # Unmatched target words guard: if the user explicitly referred to words
+                # that do not exist in this reminder (e.g. user said 'app', reminder is 'appliance'),
+                # reject this candidate.
+                unmatched_target = target_words - matched_target
+                if unmatched_target:
+                    continue
+
+                # Coverage requirement: user must provide sufficient evidence matching this reminder
+                if len(r_words) == 1 and len(matched_r) >= 1:
+                    matched_candidates.append(rem)
+                elif len(r_words) >= 2 and (
+                    len(matched_r) >= 2 or len(matched_r) == len(r_words) or len(matched_r) >= len(r_words) * 0.6
+                ):
+                    matched_candidates.append(rem)
+
+        # Ambiguity guard: exactly one matching reminder required
+        if len(matched_candidates) == 1:
+            action_type = "completed" if is_completion else "cancelled"
+            return matched_candidates[0], action_type
+        elif len(matched_candidates) > 1:
+            logger.info(
+                "Ambiguous reminder match: '%s' matched %d reminders; skipping automated completion.",
+                clean_text, len(matched_candidates)
+            )
+            return None, None
 
     return None, None
 

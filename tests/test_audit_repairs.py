@@ -334,7 +334,8 @@ def test_conversational_reminder_intent_parser_edge_cases():
     assert action == "cancelled"
 
 
-def test_conversational_reminder_triage_ambiguity_and_cancellation(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_conversational_reminder_triage_ambiguity_and_cancellation(tmp_path, monkeypatch):
     """
     Verify triage matching behavior against stored reminders:
     - Negation/Questions do not complete reminders.
@@ -345,93 +346,91 @@ def test_conversational_reminder_triage_ambiguity_and_cancellation(tmp_path, mon
     monkeypatch.setattr(storage, "get_data_dir", lambda: tmp_path)
 
     # Seed two similarly named reminders
-    asyncio.run(storage.add_reminder({
+    await storage.add_reminder({
         "id": "rem_report",
         "text": "Submit architecture report",
         "priority": "high",
         "completed": False
-    }))
-    asyncio.run(storage.add_reminder({
+    })
+    await storage.add_reminder({
         "id": "rem_diagram",
         "text": "Review architecture diagram",
         "priority": "medium",
         "completed": False
-    }))
+    })
 
     # 1. User says negation: "I haven't finished the architecture report"
-    asyncio.run(memory_engine.extract_and_triage(
+    await memory_engine.extract_and_triage(
         user_message="I haven't finished the architecture report yet.",
         assistant_reply="Understood. Let me know when you finish.",
         mode="assistant"
-    ))
-    reminders = asyncio.run(storage.load_reminders())
+    )
+    reminders = await storage.load_reminders()
     assert all(not r["completed"] for r in reminders), "Negation must not complete reminders"
 
     # 2. User says question: "Have I finished the architecture report?"
-    asyncio.run(memory_engine.extract_and_triage(
+    await memory_engine.extract_and_triage(
         user_message="Have I finished the architecture report?",
         assistant_reply="Checking your tasks, it is still pending.",
         mode="assistant"
-    ))
-    reminders = asyncio.run(storage.load_reminders())
+    )
+    reminders = await storage.load_reminders()
     assert all(not r["completed"] for r in reminders), "Question must not complete reminders"
 
     # 3. User says ambiguous statement matching both reminders
-    asyncio.run(memory_engine.extract_and_triage(
+    await memory_engine.extract_and_triage(
         user_message="I have finished the architecture.",
         assistant_reply="Noted.",
         mode="assistant"
-    ))
-    reminders = asyncio.run(storage.load_reminders())
+    )
+    reminders = await storage.load_reminders()
     assert all(not r["completed"] for r in reminders), "Ambiguous match must not silently guess"
 
     # 4. User affirms completion of specific task
-    asyncio.run(memory_engine.extract_and_triage(
+    await memory_engine.extract_and_triage(
         user_message="I finished the architecture report.",
         assistant_reply="Excellent, marked as completed.",
         mode="assistant"
-    ))
-    reminders = asyncio.run(storage.load_reminders())
+    )
+    reminders = await storage.load_reminders()
     rem_report = next(r for r in reminders if r["id"] == "rem_report")
     rem_diagram = next(r for r in reminders if r["id"] == "rem_diagram")
     assert rem_report["completed"] is True, "Specific task must be marked completed"
     assert rem_diagram["completed"] is False, "Other task must remain pending"
 
     # 5. User cancels the diagram task
-    asyncio.run(memory_engine.extract_and_triage(
+    await memory_engine.extract_and_triage(
         user_message="Cancel the reminder Review architecture diagram.",
         assistant_reply="Task cancelled.",
         mode="assistant"
-    ))
-    reminders_after_cancel = asyncio.run(storage.load_reminders())
+    )
+    reminders_after_cancel = await storage.load_reminders()
     assert not any(r["id"] == "rem_diagram" for r in reminders_after_cancel), "Cancelled task must be removed"
 
 
-def test_concurrent_reminder_deduplication(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_concurrent_reminder_deduplication(tmp_path, monkeypatch):
     """Verify concurrent triage extractions deduplicate reminders safely under lock."""
     monkeypatch.setattr(storage, "get_data_dir", lambda: tmp_path)
 
-    async def run_concurrent_test():
-        # Seed the reminder once
-        await storage.add_reminder({
-            "id": "rem_deploy",
-            "text": "Deploy version 2.0",
-            "priority": "high",
-            "completed": False
-        })
+    # Seed the reminder once
+    await storage.add_reminder({
+        "id": "rem_deploy",
+        "text": "Deploy version 2.0",
+        "priority": "high",
+        "completed": False
+    })
 
-        async def add_dup():
-            async with memory_engine.get_reminder_lock():
-                reminders = await storage.load_reminders()
-                target = "Deploy version 2.0"
-                if not any(r.get("text", "").lower() == target.lower() for r in reminders):
-                    await storage.add_reminder(target)
+    async def add_dup():
+        async with memory_engine.get_reminder_lock():
+            reminders = await storage.load_reminders()
+            target = "Deploy version 2.0"
+            if not any(r.get("text", "").lower() == target.lower() for r in reminders):
+                await storage.add_reminder(target)
 
-        await asyncio.gather(add_dup(), add_dup())
+    await asyncio.gather(add_dup(), add_dup())
 
-    asyncio.run(run_concurrent_test())
-
-    reminders = asyncio.run(storage.load_reminders())
+    reminders = await storage.load_reminders()
     matching = [r for r in reminders if "deploy version 2.0" in r.get("text", "").lower()]
     assert len(matching) == 1, f"Expected exactly 1 reminder, got {len(matching)}"
 
